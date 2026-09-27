@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-stroynadzor}
+      POSTGRES_USER: ${POSTGRES_USER:-stroynadzor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stroynadzor_dev}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: ./server
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 4000
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-stroynadzor}
+      POSTGRES_USER: ${POSTGRES_USER:-stroynadzor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stroynadzor_dev}
+      JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-me}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
+      PYTHON_AI_URL: http://python-ai:8000/process
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      python-ai:
+        condition: service_started
+
+  web:
+    build:
+      context: .
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+
+  python-ai:
+    build:
+      context: ./services/python-ai
+    ports:
+      - "8000:8000"
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    profiles: ["future-ai"]
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+volumes:
+  postgres_data:
+  rabbitmq_data:

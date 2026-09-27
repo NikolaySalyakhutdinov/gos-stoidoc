@@ -1,0 +1,221 @@
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { apiFetch } from '../api/client'
+import { useAuth } from './AuthStore'
+
+const Ctx = createContext(null)
+const EMPTY_UPLOADS = { PD: [], RD: [], ID: [] }
+
+export function VerificationProvider({ children }) {
+  const { isAuthenticated } = useAuth()
+
+  const [objects, setObjects] = useState([])
+  const [objectsLoaded, setObjectsLoaded] = useState(false)
+  const [findingsByObject, setFindingsByObject] = useState({})
+  const [completenessByObject, setCompletenessByObject] = useState({})
+  const [uploadsByObject, setUploadsByObject] = useState({})
+  const [auditEvents, setAuditEvents] = useState(null)
+
+  const pending = useRef(new Set())
+
+  useEffect(() => {
+    setObjects([])
+    setObjectsLoaded(false)
+    setFindingsByObject({})
+    setCompletenessByObject({})
+    setUploadsByObject({})
+    setAuditEvents(null)
+    pending.current.clear()
+  }, [isAuthenticated])
+
+  async function withGuard(key, fn) {
+    if (pending.current.has(key)) return
+    pending.current.add(key)
+    try {
+      await fn()
+    } finally {
+      pending.current.delete(key)
+    }
+  }
+
+  async function refreshObjects() {
+    if (!isAuthenticated) return
+    const data = await apiFetch('/api/objects')
+    setObjects(data.objects)
+    setObjectsLoaded(true)
+  }
+
+  const api = useMemo(
+    () => ({
+      objects,
+      objectsLoaded,
+
+      ensureObjects() {
+        if (!isAuthenticated || objectsLoaded) return
+        withGuard('objects', refreshObjects)
+      },
+
+      getObject(objectId) {
+        return objects.find((o) => o.id === objectId)
+      },
+
+      async createObject(payload) {
+        const data = await apiFetch('/api/objects', { method: 'POST', body: payload })
+        setObjects((list) => [data.object, ...list])
+        setObjectsLoaded(true)
+        setAuditEvents(null)
+        return data.object
+      },
+
+      ensureFindings(objectId) {
+        if (!isAuthenticated || findingsByObject[objectId]) return
+        withGuard(`findings:${objectId}`, async () => {
+          const data = await apiFetch(`/api/objects/${objectId}/findings`)
+          setFindingsByObject((s) => ({ ...s, [objectId]: data.findings }))
+        })
+      },
+
+      getFindings(objectId) {
+        return findingsByObject[objectId] || []
+      },
+
+      getFinding(objectId, findingId) {
+        return (findingsByObject[objectId] || []).find((f) => f.finding_id === findingId)
+      },
+
+      ensureCompleteness(objectId) {
+        if (!isAuthenticated || completenessByObject[objectId]) return
+        withGuard(`completeness:${objectId}`, async () => {
+          const data = await apiFetch(`/api/objects/${objectId}/completeness`)
+          setCompletenessByObject((s) => ({ ...s, [objectId]: data.completeness }))
+        })
+      },
+
+      getCompleteness(objectId) {
+        return completenessByObject[objectId] || []
+      },
+
+      ensureUploads(objectId) {
+        if (!isAuthenticated || uploadsByObject[objectId]) return
+        withGuard(`uploads:${objectId}`, async () => {
+          const data = await apiFetch(`/api/objects/${objectId}/uploads`)
+          setUploadsByObject((s) => ({ ...s, [objectId]: data.uploads }))
+        })
+      },
+
+      getUploads(objectId) {
+        return uploadsByObject[objectId] || EMPTY_UPLOADS
+      },
+
+      async addFiles(objectId, stage, files) {
+        const form = new FormData()
+        files.forEach((file) => form.append('files', file))
+        const data = await apiFetch(`/api/objects/${objectId}/uploads/${stage}`, {
+          method: 'POST',
+          body: form,
+        })
+        setUploadsByObject((s) => {
+          const current = s[objectId] || EMPTY_UPLOADS
+          return { ...s, [objectId]: { ...current, [stage]: [...current[stage], ...data.uploaded] } }
+        })
+        await refreshObjects()
+      },
+
+      async deleteObject(objectId, deletion) {
+        await apiFetch(`/api/objects/${objectId}`, { method: 'DELETE', body: deletion })
+        setObjects((list) => list.filter((object) => object.id !== objectId))
+        setFindingsByObject((state) => {
+          const next = { ...state }
+          delete next[objectId]
+          return next
+        })
+        setCompletenessByObject((state) => {
+          const next = { ...state }
+          delete next[objectId]
+          return next
+        })
+        setUploadsByObject((state) => {
+          const next = { ...state }
+          delete next[objectId]
+          return next
+        })
+        setAuditEvents(null)
+      },
+
+      async removeFile(objectId, stage, fileId) {
+        await apiFetch(`/api/objects/${objectId}/uploads/${stage}/${fileId}`, { method: 'DELETE' })
+        setUploadsByObject((s) => {
+          const current = s[objectId] || EMPTY_UPLOADS
+          return { ...s, [objectId]: { ...current, [stage]: current[stage].filter((f) => f.id !== fileId) } }
+        })
+      },
+
+      getEffectiveDocStatus(objectId, stage) {
+        const obj = objects.find((o) => o.id === objectId)
+        if (!obj) return 'MISSING'
+        return { PD: obj.pd_status, RD: obj.rd_status, ID: obj.id_status }[stage]
+      },
+
+      getProcessStatus(objectId) {
+        return objects.find((o) => o.id === objectId)?.process_status
+      },
+
+      async setProcessStatus(objectId, status) {
+        const data = await apiFetch(`/api/objects/${objectId}/status`, { method: 'PATCH', body: { status } })
+        setObjects((list) => list.map((o) => (o.id === objectId ? data.object : o)))
+      },
+
+      async finalizeProtocol(objectId) {
+        await api.setProcessStatus(objectId, 'FINALIZED')
+        setAuditEvents(null)
+      },
+
+      async reopenProtocol(objectId) {
+        await api.setProcessStatus(objectId, 'COMPLETED')
+      },
+
+      async decide(objectId, findingId, { status, reason_code, comment }) {
+        const data = await apiFetch(`/api/objects/${objectId}/findings/${findingId}/decide`, {
+          method: 'POST',
+          body: { status, reason_code, comment },
+        })
+        setFindingsByObject((s) => ({
+          ...s,
+          [objectId]: (s[objectId] || []).map((f) => (f.finding_id === findingId ? data.finding : f)),
+        }))
+        setAuditEvents(null)
+        await refreshObjects()
+      },
+
+      async undo(objectId, findingId) {
+        const data = await apiFetch(`/api/objects/${objectId}/findings/${findingId}/undo`, { method: 'POST' })
+        setFindingsByObject((s) => ({
+          ...s,
+          [objectId]: (s[objectId] || []).map((f) => (f.finding_id === findingId ? data.finding : f)),
+        }))
+        setAuditEvents(null)
+        await refreshObjects()
+      },
+
+      ensureAudit() {
+        if (!isAuthenticated || auditEvents) return
+        withGuard('audit', async () => {
+          const data = await apiFetch('/api/audit')
+          setAuditEvents(data.events)
+        })
+      },
+
+      getAudit() {
+        return auditEvents || []
+      },
+    }),
+    [objects, objectsLoaded, findingsByObject, completenessByObject, uploadsByObject, auditEvents, isAuthenticated]
+  )
+
+  return <Ctx.Provider value={api}>{children}</Ctx.Provider>
+}
+
+export function useVerification() {
+  const ctx = useContext(Ctx)
+  if (!ctx) throw new Error('useVerification must be used within VerificationProvider')
+  return ctx
+}
