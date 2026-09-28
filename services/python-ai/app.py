@@ -29,6 +29,12 @@ MODEL_PATH = Path(os.getenv("AI_MODEL_PATH", str(BASE_DIR / "models" / "construc
 MAX_REQUEST_BYTES = int(os.getenv("AI_MAX_REQUEST_BYTES", str(210 * 1024 * 1024)))
 OCR_DPI = int(os.getenv("AI_OCR_DPI", "250"))
 SEARCH_TOP_K = int(os.getenv("AI_SEARCH_TOP_K", "5"))
+MAX_REQUEST_BYTES = int(
+    os.getenv(
+        "AI_MAX_REQUEST_BYTES",
+        str(50 * 1024 * 1024)
+    )
+)
 
 _engine: SemanticSearch | None = None
 _engine_lock = threading.RLock()
@@ -117,7 +123,7 @@ def process_document(fields: dict[str, str], uploaded: dict[str, object]) -> dic
 
     with tempfile.TemporaryDirectory(prefix="stroynadzor-ai-") as temp_dir:
         work_dir = Path(temp_dir)
-        input_path = work_dir / f"document{suffix}"
+        input_path = work_dir / Path(file_name).name
         chunks_path = work_dir / "chunks.json"
         index_path = work_dir / "search_index.npz"
         input_path.write_bytes(file_content)
