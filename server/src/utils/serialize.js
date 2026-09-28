@@ -16,6 +16,9 @@ export function serializeObject(row) {
     matrix_version: row.matrix_version,
     dataset_version: row.dataset_version,
     model_version: row.model_version,
+    process_step: row.process_step,
+    process_progress: Number(row.process_progress || 0),
+    process_error: row.process_error,
     updated_at: row.updated_at,
     finalized_at: row.finalized_at,
   }
@@ -61,6 +64,7 @@ export function findingsSummary(findings) {
 
 export function objectColor(processStatus, summary) {
   if (processStatus === 'PENDING' || processStatus === 'PARSING') return 'grey'
+  if (processStatus === 'FAILED') return 'red'
   if (summary.confirmed > 0) return 'red'
   if (summary.open > 0) return 'yellow'
   return 'green'

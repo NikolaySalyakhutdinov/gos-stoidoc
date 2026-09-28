@@ -7,6 +7,7 @@ export const PROCESS_STATUS = {
   VERIFYING: { label: 'Верификация', color: 'yellow' },
   COMPLETED: { label: 'Верификация завершена', color: 'blue' },
   FINALIZED: { label: 'Протокол финализирован', color: 'green' },
+  FAILED: { label: 'Ошибка проверки', color: 'red' },
 }
 
 export const DOC_STAGES = [

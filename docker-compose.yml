@@ -27,13 +27,14 @@ services:
       JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-me}
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
       PYTHON_AI_URL: http://python-ai:8000/process
+      PYTHON_AI_TIMEOUT_MS: ${PYTHON_AI_TIMEOUT_MS:-900000}
     ports:
       - "4000:4000"
     depends_on:
       postgres:
         condition: service_healthy
       python-ai:
-        condition: service_started
+        condition: service_healthy
 
   web:
     build:
@@ -48,6 +49,14 @@ services:
       context: ./services/python-ai
     ports:
       - "8000:8000"
+    environment:
+      AI_MODEL_PATH: /app/models/construction-minilm-132
+      AI_OCR_DPI: ${AI_OCR_DPI:-250}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   rabbitmq:
     image: rabbitmq:3.13-management-alpine

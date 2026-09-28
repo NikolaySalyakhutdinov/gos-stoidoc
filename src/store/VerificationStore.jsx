@@ -44,6 +44,24 @@ export function VerificationProvider({ children }) {
     setObjectsLoaded(true)
   }
 
+  async function refreshObject(objectId) {
+    if (!isAuthenticated) return null
+    const data = await apiFetch(`/api/objects/${objectId}`)
+    setObjects((list) => {
+      const exists = list.some((object) => object.id === objectId)
+      return exists ? list.map((object) => (object.id === objectId ? data.object : object)) : [data.object, ...list]
+    })
+    if (findingsByObject[objectId]) {
+      const findings = await apiFetch(`/api/objects/${objectId}/findings`)
+      setFindingsByObject((state) => ({ ...state, [objectId]: findings.findings }))
+    }
+    if (completenessByObject[objectId]) {
+      const completeness = await apiFetch(`/api/objects/${objectId}/completeness`)
+      setCompletenessByObject((state) => ({ ...state, [objectId]: completeness.completeness }))
+    }
+    return data.object
+  }
+
   const api = useMemo(
     () => ({
       objects,
@@ -53,6 +71,8 @@ export function VerificationProvider({ children }) {
         if (!isAuthenticated || objectsLoaded) return
         withGuard('objects', refreshObjects)
       },
+
+      refreshObject,
 
       getObject(objectId) {
         return objects.find((o) => o.id === objectId)

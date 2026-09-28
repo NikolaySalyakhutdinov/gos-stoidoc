@@ -8,10 +8,10 @@ import { PROCESS_STATUS, LOAD_STATUS, SCENARIOS } from '../data/constants'
 
 const PARSE_STEPS = [
   'Распознавание текста (OCR)…',
-  'Извлечение данных по 132 параметрам (NLP)…',
-  'CV-анализ чертежей и схем…',
-  'Сопоставление редакций ПД / РД / ИД…',
-  'Формирование карточек доказательств…',
+  'Разбиение текста на фрагменты…',
+  'Поиск по 132 параметрам MiniLM…',
+  'Сопоставление ПД / РД / ИД…',
+  'Формирование доказательств и протокола…',
 ]
 
 const DELETE_REASONS = [
@@ -25,32 +25,54 @@ const DELETE_REASONS = [
 export default function ObjectOverview() {
   const { id } = useParams()
   const nav = useNavigate()
-  const { objects, ensureObjects, getFindings, ensureFindings, getCompleteness, ensureCompleteness, setProcessStatus, deleteObject } = useVerification()
+  const { objects, ensureObjects, getFindings, ensureFindings, getCompleteness, ensureCompleteness, setProcessStatus, refreshObject, deleteObject } = useVerification()
   const obj = objects.find((o) => o.id === id)
-  const [progress, setProgress] = useState(0)
-  const [stepIdx, setStepIdx] = useState(0)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState('')
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [deleteReason, setDeleteReason] = useState('')
   const [deleteComment, setDeleteComment] = useState('')
   const [analysisError, setAnalysisError] = useState('')
-  const timerRef = useRef(null)
+  const pollRef = useRef(null)
+  const refreshObjectRef = useRef(refreshObject)
+
+  const status = obj?.process_status
+  const findings = obj ? getFindings(id) : []
+  const completeness = obj ? getCompleteness(id) : []
 
   useEffect(() => {
     ensureObjects()
     ensureFindings(id)
     ensureCompleteness(id)
-    return () => clearInterval(timerRef.current)
+    return () => clearTimeout(pollRef.current)
   }, [id, ensureObjects, ensureFindings, ensureCompleteness])
+
+  useEffect(() => {
+    refreshObjectRef.current = refreshObject
+  }, [refreshObject])
+
+  useEffect(() => {
+    if (status !== 'PARSING') return undefined
+    let stopped = false
+    const poll = async () => {
+      try {
+        const updated = await refreshObjectRef.current(id)
+        if (!stopped && updated?.process_status === 'PARSING') pollRef.current = setTimeout(poll, 1500)
+      } catch {
+        if (!stopped) pollRef.current = setTimeout(poll, 2500)
+      }
+    }
+    poll()
+    return () => {
+      stopped = true
+      clearTimeout(pollRef.current)
+    }
+  }, [id, status])
 
   if (!obj) {
     return <div className="empty-state">Загрузка объекта… <Link className="link-btn" to="/">Вернуться на дашборд</Link></div>
   }
 
-  const status = obj.process_status
-  const findings = getFindings(id)
-  const completeness = getCompleteness(id)
   const color = obj.color
 
   const confirmed = findings.filter((f) => f.status === 'CONFIRMED_VIOLATION').length
@@ -67,22 +89,6 @@ export default function ObjectOverview() {
       setAnalysisError(error.message || 'Не удалось запустить проверку')
       return
     }
-    setProgress(0)
-    setStepIdx(0)
-    let p = 0
-    timerRef.current = setInterval(() => {
-      p += 7 + Math.random() * 6
-      const idx = Math.min(PARSE_STEPS.length - 1, Math.floor((p / 100) * PARSE_STEPS.length))
-      setStepIdx(idx)
-      if (p >= 100) {
-        p = 100
-        setProgress(100)
-        clearInterval(timerRef.current)
-        setTimeout(() => setProcessStatus(id, 'READY'), 300)
-      } else {
-        setProgress(p)
-      }
-    }, 260)
   }
 
   function openDeleteDialog() {
@@ -221,8 +227,18 @@ export default function ObjectOverview() {
       {status === 'PARSING' && (
         <div className="card card-pad" style={{ marginTop: 18 }}>
           <div style={{ fontWeight: 700, marginBottom: 10, fontSize: 14 }}>Идёт обработка документов</div>
-          <div className="progress-track"><div className="progress-fill" style={{ width: `${progress}%` }} /></div>
-          <div className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>{PARSE_STEPS[stepIdx]}</div>
+          <div className="progress-track"><div className="progress-fill" style={{ width: `${Number(obj.process_progress || 0)}%` }} /></div>
+          <div className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>{obj.process_step || PARSE_STEPS[0]}</div>
+        </div>
+      )}
+
+      {status === 'FAILED' && (
+        <div className="card card-pad" style={{ marginTop: 18, borderColor: 'var(--red-border)' }}>
+          <div style={{ fontWeight: 700, marginBottom: 6, color: 'var(--red)' }}>Проверка не выполнена</div>
+          <div className="muted" style={{ fontSize: 13 }}>{obj.process_error || 'AI-сервис вернул ошибку. Проверьте журнал и запустите проверку повторно.'}</div>
+          <button className="btn btn-primary" style={{ marginTop: 12 }} onClick={runAnalysis}>
+            <Icon name="refresh" size={14} /> Повторить проверку
+          </button>
         </div>
       )}
 
@@ -278,7 +294,7 @@ export default function ObjectOverview() {
 }
 
 function colorLabel(color) {
-  return { green: 'Нарушений нет', yellow: 'Есть кандидаты', red: 'Есть нарушения', grey: 'Проверка не запущена' }[color]
+  return { green: 'Нарушений нет', yellow: 'Есть кандидаты', red: 'Есть нарушения', grey: 'Проверка не запущена' }[color] || 'Проверка требует внимания'
 }
 
 function InfoRow({ label, value, mono }) {

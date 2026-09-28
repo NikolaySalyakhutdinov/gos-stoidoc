@@ -75,6 +75,9 @@ export async function initDatabase() {
       matrix_version TEXT,
       dataset_version TEXT,
       model_version TEXT,
+      process_step TEXT,
+      process_progress NUMERIC NOT NULL DEFAULT 0,
+      process_error TEXT,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       finalized_at TIMESTAMPTZ
     );
@@ -89,7 +92,8 @@ export async function initDatabase() {
       sha256 CHAR(64) NOT NULL,
       content BYTEA NOT NULL,
       uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      parse_status TEXT NOT NULL DEFAULT 'PENDING'
+      parse_status TEXT NOT NULL DEFAULT 'PENDING',
+      parse_error TEXT
     );
 
     CREATE TABLE IF NOT EXISTS findings (
@@ -157,6 +161,7 @@ export async function initDatabase() {
       status TEXT NOT NULL DEFAULT 'PENDING',
       current_step TEXT,
       progress NUMERIC NOT NULL DEFAULT 0,
+      error TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -311,6 +316,12 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_object_id ON audit_logs(object_id);
     CREATE INDEX IF NOT EXISTS idx_process_jobs_process_id ON process_jobs(process_id);
+
+    ALTER TABLE objects ADD COLUMN IF NOT EXISTS process_step TEXT;
+    ALTER TABLE objects ADD COLUMN IF NOT EXISTS process_progress NUMERIC NOT NULL DEFAULT 0;
+    ALTER TABLE objects ADD COLUMN IF NOT EXISTS process_error TEXT;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS parse_error TEXT;
+    ALTER TABLE analysis_processes ADD COLUMN IF NOT EXISTS error TEXT;
   `)
 
   const seedMarker = await query("SELECT value FROM system_settings WHERE key = 'matrix_v1.1_seeded'")

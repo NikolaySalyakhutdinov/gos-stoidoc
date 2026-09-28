@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { query, withTransaction } from '../db.js'
 import { requireAuth } from '../middleware/auth.js'
 import { asyncHandler, recordAudit } from '../utils/http.js'
-import { notifyPythonAi } from '../services/aiGateway.js'
+import { runObjectAnalysis } from '../services/aiPipeline.js'
 import { serializeObject, serializeFinding, findingsSummary, objectColor } from '../utils/serialize.js'
 
 const router = Router()
@@ -12,7 +12,7 @@ router.use(requireAuth)
 
 const REASON_CODES = ['WRONG_REVISION', 'APPROVED_CHANGE', 'OCR_ERROR', 'LINK_ERROR', 'NOT_APPLICABLE_PARAM', 'OTHER']
 const DECISION_STATUSES = ['CONFIRMED_VIOLATION', 'NEGATIVE_VERIFIED', 'CLARIFICATION_REQUIRED', 'CANDIDATE', 'NOT_APPLICABLE']
-const PROCESS_STATUSES = ['PENDING', 'PARSING', 'READY', 'VERIFYING', 'COMPLETED', 'FINALIZED']
+const PROCESS_STATUSES = ['PENDING', 'PARSING', 'READY', 'VERIFYING', 'COMPLETED', 'FINALIZED', 'FAILED']
 const DOCUMENT_STAGES = ['PD', 'RD', 'ID']
 const DELETE_REASONS = {
   DUPLICATE_OBJECT: 'Дубликат объекта',
@@ -111,21 +111,38 @@ router.patch('/:id/status', asyncHandler(async (req, res) => {
   if (!PROCESS_STATUSES.includes(status)) return res.status(400).json({ error: 'Некорректный статус процесса' })
   const row = await getObject(req.params.id)
   if (!row) return res.status(404).json({ error: 'Объект не найден' })
+  let processId = null
   if (status === 'PARSING') {
     const files = await query('SELECT COUNT(*)::int AS count FROM files WHERE object_id = $1', [row.id])
     if (files.rows[0].count === 0) {
       return res.status(400).json({ error: 'Нельзя запустить проверку: сначала загрузите хотя бы один документ', code: 'DOCUMENTS_REQUIRED' })
     }
+    const active = await query(`SELECT process_id FROM analysis_processes WHERE object_id = $1 AND status NOT IN ('COMPLETED', 'FINALIZED', 'FAILED') ORDER BY created_at DESC LIMIT 1`, [row.id])
+    processId = active.rows[0]?.process_id || randomUUID()
   }
   const finalizedAt = status === 'FINALIZED' ? new Date() : status === 'COMPLETED' ? null : row.finalized_at
   const result = await withTransaction(async (client) => {
+    if (status === 'PARSING' && !row.process_status?.includes('PARSING')) {
+      const existing = await client.query('SELECT process_id FROM analysis_processes WHERE process_id = $1', [processId])
+      if (!existing.rows[0]) {
+        await client.query('INSERT INTO analysis_processes (process_id, object_id) VALUES ($1, $2)', [processId, row.id])
+      }
+    }
     const updated = await client.query(
-      `UPDATE objects SET process_status = $1, updated_at = NOW(), finalized_at = $2 WHERE id = $3 RETURNING *`,
+      `UPDATE objects SET process_status = $1, process_error = NULL, process_progress = CASE WHEN $1 = 'PARSING' THEN 0 ELSE process_progress END,
+       process_step = CASE WHEN $1 = 'PARSING' THEN 'Ожидание AI-сервиса' ELSE process_step END,
+       updated_at = NOW(), finalized_at = $2 WHERE id = $3 RETURNING *`,
       [status, finalizedAt, row.id],
     )
+    if (status === 'PARSING') {
+      await client.query(`UPDATE analysis_processes SET status = 'PENDING', current_step = 'Ожидание AI-сервиса', progress = 0, error = NULL, updated_at = NOW() WHERE process_id = $1`, [processId])
+    }
     await recordAudit(client, { req, objectId: row.id, action: status === 'FINALIZED' ? 'PROTOCOL_FINALIZED' : 'PROCESS_STATUS_CHANGED', details: { status } })
     return updated.rows[0]
   })
+  if (status === 'PARSING') {
+    setImmediate(() => runObjectAnalysis({ objectId: row.id, processId, req }))
+  }
   res.json({ object: await serializeObjectWithSummary(result) })
 }))
 
@@ -229,14 +246,6 @@ router.post('/:id/uploads/:stage', upload.array('files', 10), asyncHandler(async
     return uploaded
   })
 
-  for (const file of saved) {
-    notifyPythonAi({ objectId: object.id, processId: file.processId, file })
-      .then(async () => query('UPDATE process_jobs SET status = $1, updated_at = NOW() WHERE file_id = $2', ['SENT_TO_AI', file.id]))
-      .catch(async (error) => {
-        console.warn(`Python AI unavailable for ${file.name}:`, error.message)
-        await query('UPDATE process_jobs SET status = $1, error = $2, updated_at = NOW() WHERE file_id = $3', ['AI_UNAVAILABLE', error.message, file.id]).catch(() => {})
-      })
-  }
   res.status(201).json({ uploaded: saved.map(({ id, name, size }) => ({ id, name, size, uploaded_at: new Date().toISOString() })), process_id: saved[0].processId })
 }))
 
