@@ -1,237 +1,281 @@
-# gos-stoidoc
+# Стройнадзор ИИ
 
-Инструкция по клонированию приватного репозитория `gos-stoidoc` на другом компьютере вместе с файлами, которые хранятся через Git LFS.
+Локальная система для загрузки проектной, рабочей и исполнительной документации и автоматической проверки параметров объекта.
 
-Репозиторий приватный. Инструкция предназначена для пользователей, которым уже предоставлен доступ к репозиторию на GitHub.
+## 1. Что нужно установить
 
-## Что понадобится
+- Docker Desktop с включённым WSL 2;
+- Git — только если проект нужно скачать из GitHub.
 
-- аккаунт GitHub с доступом к репозиторию;
-- Git;
-- Git LFS;
-- доступ к интернету.
+Для первого запуска рекомендуется выделить Docker Desktop не менее 8 ГБ оперативной памяти: AI-сервис загружает модель MiniLM.
 
-## Установка и проверка Git и Git LFS
+## 2. Запуск через Docker
 
-Установите Git для своей операционной системы с официального сайта:
-
-<https://git-scm.com/downloads>
-
-Git LFS обычно устанавливается вместе с Git для Windows. Если команда Git LFS не работает, установите его отдельно:
-
-<https://git-lfs.com/>
-
-Откройте PowerShell или терминал и проверьте установку:
+Откройте PowerShell и перейдите в каталог проекта:
 
 ```powershell
-git --version
-git lfs version
+cd C:\Users\olgas\OneDrive\Desktop\Коля\stroynadzor-ai-main
 ```
 
-Обе команды должны вывести версии установленных программ.
-
-Один раз включите Git LFS для текущего пользователя:
+Если проект ещё не скачан:
 
 ```powershell
-git lfs install
+git clone https://github.com/NikolaySalyakhutdinov/gos-stoidoc.git stroynadzor-ai-main
+cd stroynadzor-ai-main
 ```
 
-Ожидаемый результат — сообщение о том, что Git LFS настроен.
-
-## Клонирование репозитория
-
-1. Убедитесь, что на GitHub вашему аккаунту предоставлен доступ к приватному репозиторию `gos-stoidoc`.
-
-2. Перейдите в папку, в которую хотите скачать проект, и выполните:
+Создайте локальный файл настроек:
 
 ```powershell
-git clone https://github.com/NikolaySalyakhutdinov/gos-stoidoc.git
+Copy-Item .env.example .env -Force
 ```
 
-3. Перейдите в каталог проекта:
+Запустите приложение вместе с RabbitMQ:
 
 ```powershell
-cd gos-stoidoc
+docker compose --profile messaging up -d --build
 ```
 
-Если GitHub запросит авторизацию, войдите под аккаунтом, которому предоставлен доступ к репозиторию. Обычный пароль GitHub нельзя использовать вместо пароля Git в командной строке. Используйте авторизацию через браузер/Git Credential Manager или Personal Access Token.
-
-## Скачивание файлов Git LFS
-
-После клонирования скачайте настоящие версии файлов, хранящихся в Git LFS:
+Проверка состояния:
 
 ```powershell
-git lfs pull
+docker compose --profile messaging ps
 ```
 
-В проекте через Git LFS хранится, в частности, модель:
+Основные контейнеры должны иметь статус `Up`. У `postgres` и `python-ai` должен быть статус `healthy`.
+
+## 3. Адреса сервисов
+
+| Назначение | Адрес |
+|---|---|
+| Веб-приложение | http://localhost:8080 |
+| Node.js API | http://localhost:4000 |
+| Проверка API | http://localhost:4000/api/health |
+| OpenAPI 3.0.3 | http://localhost:4000/openapi.json |
+| Python AI | http://localhost:8000/health |
+| RabbitMQ Management | http://localhost:15672 |
+
+Веб-приложение открывается на `http://localhost:8080`.
+Пароль и логин для RabbitMQ: guest
+RabbitMQ используется API для асинхронной постановки задач анализа. В Management UI очередь находится в разделе `Queues and Streams` и называется `stroynadzor.analysis`.
+
+## 4. Вход в приложение
+
+### Демо-вход для локального режима
 
 ```text
-services/python-ai/models/construction-minilm-132/model.safetensors
+Email:    inspector@stroynadzor-ai.ru
+Пароль:   demo1234
 ```
 
-## Проверка Git LFS
+Демо-пользователь создаётся автоматически при первом успешном входе, если контейнер API запущен с `NODE_ENV=development`.
 
-Проверьте, какие файлы отслеживаются через Git LFS:
+### Регистрация нового пользователя
 
-```powershell
-git lfs ls-files
-```
+На странице регистрации укажите:
 
-В выводе должна присутствовать модель, например:
+- имя;
+- email с доменом `.ru`;
+- пароль минимум из 6 символов.
+
+Пример:
 
 ```text
-26d7feac2a * services/python-ai/models/construction-minilm-132/model.safetensors
+Имя:      Тестовый инспектор
+Email:    inspector2@example.ru
+Пароль:   StrongPass123
 ```
 
-Звёздочка `*` означает, что файл загружен в рабочую копию.
+В production демо-вход использовать нельзя. Задайте собственные секреты в `.env` до запуска:
 
-## Проверка размера модели
+```dotenv
+JWT_SECRET=замените-на-длинный-случайный-секрет
+POSTGRES_PASSWORD=замените-на-пароль-базы
+```
 
-В PowerShell выполните:
+### Вход в RabbitMQ
+
+Для локального RabbitMQ Management UI:
+
+```text
+Логин:  guest
+Пароль: guest
+```
+
+Эти данные предназначены только для локального запуска.
+
+## 5. API: где находится и как авторизоваться
+
+Исходный код API находится в каталоге:
+
+```text
+server/src/
+```
+
+Основные файлы:
+
+```text
+server/src/index.js                 запуск Express и middleware
+server/src/routes/auth.js           регистрация и вход
+server/src/routes/objects.js        объекты, документы и результаты проверки
+server/src/routes/matrix.js         параметры матрицы
+server/src/routes/audit.js          аудит действий
+server/src/services/jobQueue.js     RabbitMQ: публикация и обработка задач
+server/openapi/openapi.json         контракт OpenAPI 3.0.3
+```
+
+Открытые маршруты, которым не нужен JWT:
+
+```text
+POST /api/auth/register
+POST /api/auth/login
+POST /api/auth/refresh
+POST /api/auth/forgot-password
+GET  /api/health
+GET  /openapi.json
+GET  /metrics
+```
+
+После регистрации или входа API возвращает `token` и `refreshToken`. Для остальных JSON-запросов передавайте JWT так:
+
+```http
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+Основные защищённые маршруты:
+
+```text
+GET/PATCH /api/auth/me
+PATCH     /api/auth/me/notifications
+POST      /api/auth/change-password
+
+GET/POST/DELETE /api/objects
+GET             /api/objects/:id
+PATCH           /api/objects/:id/status
+GET             /api/objects/:id/completeness
+GET             /api/objects/:id/findings
+GET             /api/objects/:id/suspicions
+
+GET         /api/objects/:id/uploads
+POST        /api/objects/:id/uploads/:stage
+DELETE      /api/objects/:id/uploads/:stage/:fileId
+
+POST        /api/objects/:id/findings/:findingId/decide
+POST        /api/objects/:id/findings/:findingId/undo
+
+GET         /api/matrix
+POST        /api/matrix       только роль ADMIN
+DELETE      /api/matrix/:id   только роль ADMIN
+GET         /api/audit
+```
+
+JSON-запросы и ответы проверяются по OpenAPI-схеме. Файл схемы можно открыть по адресу `http://localhost:4000/openapi.json` или найти в `server/openapi/openapi.json`.
+
+Исключения:
+
+- загрузка документов использует `multipart/form-data`;
+- поток прогресса обработки использует SSE `text/event-stream`;
+- просмотр исходного файла возвращает binary;
+- `/metrics` возвращает формат Prometheus.
+
+## 6. Что происходит после загрузки документов
+
+1. Web-интерфейс отправляет документ в Node.js API.
+2. API сохраняет файл и создаёт задачу анализа.
+3. Задача отправляется в RabbitMQ в очередь `stroynadzor.analysis`.
+4. Worker API получает задачу и передаёт документ в Python AI.
+5. Python AI выполняет Parser v2 → layout-aware Chunker v3 → MiniLM TOP-20 → source-aware reranker → Parameter Extractor.
+6. API сохраняет результат сравнения ПД/РД/ИД и публикует прогресс в интерфейс.
+
+Если RabbitMQ временно недоступен, API использует прямой fallback-режим анализа. Для штатной асинхронной работы запускайте проект с профилем `messaging`.
+
+## 7. Логи и мониторинг
+
+Логи:
 
 ```powershell
-Get-Item ".\services\python-ai\models\construction-minilm-132\model.safetensors" |
-    Select-Object FullName, Length
+docker compose logs -f api
+docker compose logs -f python-ai
+docker compose logs -f rabbitmq
 ```
 
-Настоящая модель должна занимать примерно **449 МБ** — около 449 000 000 байт.
-
-Если размер файла составляет примерно 130–150 байт, скачался только Git LFS pointer — небольшой текстовый файл-ссылку вместо самой модели. В этом случае восстановите файл по инструкции ниже.
-
-## Если вместо модели скачался Git LFS pointer
-
-Находясь в каталоге проекта `gos-stoidoc`, выполните команды последовательно:
+Для запуска Prometheus, Grafana и ELK:
 
 ```powershell
-git lfs fetch origin main
-git lfs checkout
-git lfs pull origin main
+docker compose --profile messaging --profile monitoring up -d --build
 ```
 
-Что делают эти команды:
+Адреса:
 
-1. `git lfs fetch origin main` скачивает LFS-объекты с удалённого репозитория.
-2. `git lfs checkout` заменяет pointer настоящими файлами из локального LFS-хранилища.
-3. `git lfs pull origin main` синхронизирует LFS-файлы с веткой `main`.
+| Сервис | Адрес |
+|---|---|
+| Grafana | http://localhost:3000 |
+| Prometheus | http://localhost:9090 |
+| Kibana | http://localhost:5601 |
+| Elasticsearch | http://localhost:9200 |
 
-После этого снова проверьте размер модели:
+Локальный вход в Grafana по умолчанию:
+
+```text
+Логин:  admin
+Пароль: local-grafana-change-me
+```
+
+Для изменения пароля задайте `GRAFANA_ADMIN_PASSWORD` в `.env` до запуска.
+
+## 8. Остановка и повторный запуск
+
+Остановить контейнеры без удаления данных:
 
 ```powershell
-Get-Item ".\services\python-ai\models\construction-minilm-132\model.safetensors" |
-    Select-Object FullName, Length
+docker compose --profile messaging --profile monitoring down
 ```
 
-Если файл по-прежнему имеет размер около 130–150 байт, проверьте доступ к приватному репозиторию и повторите авторизацию GitHub.
-
-## Обычное обновление проекта
-
-Чтобы получить последние изменения из ветки `main`, выполните в каталоге проекта:
+Запустить снова:
 
 ```powershell
-git pull origin main
-git lfs pull
+docker compose --profile messaging up -d
 ```
 
-Первая команда обновляет обычные файлы Git, вторая — файлы, хранящиеся через Git LFS.
+Не используйте `down -v`, если нужно сохранить пользователей, объекты, документы и результаты проверки: эта команда удаляет volumes PostgreSQL и RabbitMQ.
 
-## Быстрый старт
+## 9. Типовые проблемы
 
-Если Git и Git LFS уже установлены, а доступ к репозиторию настроен, достаточно выполнить:
+### Открывается ошибка `502` или `Host is unreachable`
+
+Проверьте API:
 
 ```powershell
-git lfs install
-git clone https://github.com/NikolaySalyakhutdinov/gos-stoidoc.git
-cd gos-stoidoc
-git lfs pull
-git lfs ls-files
-Get-Item ".\services\python-ai\models\construction-minilm-132\model.safetensors" | Select-Object FullName, Length
+docker compose ps api
+docker compose logs --tail 100 api
 ```
 
-## AI-пайплайн документов
-
-После загрузки документов AI-сервис выполняет `Parser v2 → layout-aware Chunker
-v3 → MiniLM TOP-20 → source-aware reranker → Parameter Extractor`, а Node.js
-сравнивает подтверждённые значения между ПД, РД и ИД. Блоки с числовыми
-размерами чертежей сохраняются с `bbox`, но не смешиваются с текстом и не
-принимаются за значение параметра. При отсутствии подтверждённого значения
-создаётся статус `NOT_FOUND`.
-
-Страница объекта получает состояние обработки через Server-Sent Events (SSE):
-полоса прогресса и текущий этап меняются без перезагрузки страницы. Если поток
-недоступен, остаётся резервный опрос API. В протокол проверки попадают только
-строки, где подтверждены оба сравниваемых значения; записи `NOT_FOUND` и строки
-с `null` сохраняются в базе для диагностики, но не выводятся как данные для
-сверки.
-
-RabbitMQ в `docker-compose.yml` можно использовать как брокер фоновых заданий,
-но он не заменяет канал обновления браузера. Текущий анализ публикует события
-прогресса из Node.js в SSE-поток `/api/objects/:id/events`.
-
-## Метрики, логи и очереди
-
-API публикует Prometheus-метрики на `http://localhost:4000/metrics`, а Python AI
-сервис — на `http://localhost:8000/metrics`. В метриках есть HTTP latency,
-завершённые анализы, RabbitMQ-сообщения и количество гипотез по каждому методу.
-
-Контракт JSON REST API описан в
-[`server/openapi/openapi.json`](server/openapi/openapi.json) как OpenAPI 3.0.3.
-Express проверяет входные JSON-тела, path-параметры, Bearer security и ответы;
-ошибка схемы возвращается с кодом `OPENAPI_VALIDATION_ERROR`. Актуальная схема
-доступна через `GET /openapi.json`. Загрузка файлов, SSE-прогресс, бинарный
-просмотр документов и `/metrics` являются документированными исключениями с
-собственными форматами.
-
-Для локального Grafana/Prometheus и ELK-профиля:
+Перезапустите API:
 
 ```powershell
-Copy-Item .env.example .env
-# В .env задайте GRAFANA_ADMIN_PASSWORD и LOGSTASH_URL=http://logstash:8080
-docker compose --profile messaging --profile monitoring up --build
+docker compose --profile messaging up -d --build api
 ```
 
-После запуска Grafana доступна на `http://localhost:3000`, Prometheus — на
-`http://localhost:9090`, Kibana — на `http://localhost:5601`, Elasticsearch —
-только на `127.0.0.1:9200`, RabbitMQ — на `localhost:15672`. Мониторинг в
-Compose намеренно привязан к localhost; настройки без TLS предназначены только
-для локальной разработки и требуют защищённой конфигурации в production.
+### В RabbitMQ нет очереди
 
-Node.js и Python пишут структурированные JSON-логи в stdout. При заданном
-`LOGSTASH_URL` они также отправляются в Logstash и индексируются в Elasticsearch
-для поиска в Kibana.
-
-Гипотезы вне Матрицы создаются только со статусом `SUSPICION` четырьмя методами:
-`LOGICAL_ANALYSIS`, `SEMANTIC_DISSONANCE`, `NORMATIVE_ANALYSIS` и `ML_PATTERN`.
-Они дедуплицируются внутри объекта и набора сопоставимых редакций, не входят в
-число подтверждённых нарушений и не становятся учебной положительной меткой.
-Для перевода в `CANDIDATE` backend требует источники и координаты доказательств;
-прямой переход из `SUSPICION` в `CONFIRMED_VIOLATION` запрещён. Статусы
-`NOT_APPLICABLE` и `NOT_COMPARABLE` выставляются только ручным решением инспектора.
-
-Проверка Python-пайплайна в Docker:
+Запустите проект с профилем очереди и обновите страницу Management UI:
 
 ```powershell
-npm run ai:test
+docker compose --profile messaging up -d
 ```
 
-Ожидаемый размер `model.safetensors` — примерно **449 МБ**.
+После запуска API очередь `stroynadzor.analysis` создаётся автоматически.
 
-## Полезные команды Git LFS
+### Регистрация отклоняется
 
-Проверить состояние LFS:
+Проверьте, что email заканчивается на `.ru`, а пароль содержит минимум 6 символов.
+
+### Нужно полностью очистить локальные данные
+
+Выполняйте только если данные больше не нужны:
 
 ```powershell
-git lfs status
+docker compose --profile messaging --profile monitoring down -v
 ```
 
-Показать все LFS-файлы в текущей версии проекта:
-
-```powershell
-git lfs ls-files
-```
-
-Принудительно скачать LFS-файлы для ветки `main`:
-
-```powershell
-git lfs pull origin main
-```
