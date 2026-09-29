@@ -28,6 +28,9 @@ services:
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
       PYTHON_AI_URL: http://python-ai:8000/process
       PYTHON_AI_TIMEOUT_MS: ${PYTHON_AI_TIMEOUT_MS:-1800000}
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://rabbitmq:5672}
+      RABBITMQ_ANALYSIS_QUEUE: ${RABBITMQ_ANALYSIS_QUEUE:-stroynadzor.analysis}
+      LOGSTASH_URL: ${LOGSTASH_URL:-}
     ports:
       - "4000:4000"
     depends_on:
@@ -52,6 +55,7 @@ services:
     environment:
       AI_MODEL_PATH: /app/models/construction-minilm-132
       AI_OCR_DPI: ${AI_OCR_DPI:-250}
+      LOGSTASH_URL: ${LOGSTASH_URL:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 10s
@@ -60,13 +64,79 @@ services:
 
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
-    profiles: ["future-ai"]
+    profiles: ["messaging"]
     ports:
       - "5672:5672"
       - "15672:15672"
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
 
+  # Local-only monitoring profile. Set LOGSTASH_URL and GRAFANA_ADMIN_PASSWORD
+  # in .env before starting it; these services are never bound to public interfaces.
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["monitoring"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    profiles: ["monitoring"]
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    ports:
+      - "127.0.0.1:9200:9200"
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.15.3
+    profiles: ["monitoring"]
+    depends_on:
+      - elasticsearch
+    volumes:
+      - ./infra/logstash/pipeline:/usr/share/logstash/pipeline:ro
+    ports:
+      - "127.0.0.1:8081:8080"
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.3
+    profiles: ["monitoring"]
+    depends_on:
+      - elasticsearch
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      XPACK_SECURITY_ENABLED: "false"
+    ports:
+      - "127.0.0.1:5601:5601"
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    profiles: ["monitoring"]
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-local-grafana-change-me}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+
 volumes:
   postgres_data:
   rabbitmq_data:
+  prometheus_data:
+  elasticsearch_data:
+  grafana_data:

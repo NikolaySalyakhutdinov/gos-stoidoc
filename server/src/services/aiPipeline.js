@@ -1,13 +1,17 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { query, withTransaction } from '../db.js'
 import { recordAudit } from '../utils/http.js'
 import { normalizeFilename } from '../utils/filename.js'
 import { processDocumentWithAi } from './aiGateway.js'
 import { publishProgress } from './progressEvents.js'
+import { detectSuspicions } from './suspicionDetector.js'
+import { logger } from '../observability/logger.js'
+import { recordAnalysis, recordSuspicions } from '../observability/metrics.js'
 
 const STAGES = ['PD', 'RD', 'ID']
 const AI_DISCOVERY_METHOD = 'AI_SEMANTIC_COMPARATOR'
 const MAX_EVIDENCE_CANDIDATES = 12
+const SUSPICION_METHODS = ['LOGICAL_ANALYSIS', 'SEMANTIC_DISSONANCE', 'NORMATIVE_ANALYSIS', 'ML_PATTERN']
 
 function stageSource(parameter, stage) {
   return { PD: parameter.source_pd, RD: parameter.source_rd, ID: parameter.source_id }[stage]
@@ -519,7 +523,103 @@ async function persistComparison({ client, objectId, comparisons, documents, par
   return { stages: [...stages], parameterCount: parameters.length }
 }
 
-export async function runObjectAnalysis({ objectId, processId, req }) {
+function suspicionFindingId(objectId, dedupKey) {
+  return `susp-${objectId}-${createHash('sha1').update(dedupKey).digest('hex').slice(0, 16)}`
+}
+
+async function persistSuspicions({ client, objectId, suspicions }) {
+  await client.query(
+    `DELETE FROM findings
+     WHERE object_id = $1 AND status = 'SUSPICION' AND discovery_method = ANY($2::text[])`,
+    [objectId, SUSPICION_METHODS],
+  )
+  await client.query(
+    `DELETE FROM suspicions
+     WHERE object_id = $1 AND status = 'OPEN' AND discovery_method = ANY($2::text[])`,
+    [objectId, SUSPICION_METHODS],
+  )
+
+  for (const suspicion of suspicions) {
+    const findingId = suspicionFindingId(objectId, suspicion.dedup_key)
+    const suspicionId = findingId.replace(/^susp-/, 'sus-')
+    const comparison = {
+      ...suspicion.comparison,
+      suspicion: { ...suspicion.comparison.suspicion, suspicion_id: suspicionId },
+    }
+    const rdSource = suspicion.rd_source || { RD: null, ID: null }
+    await client.query(
+      `INSERT INTO findings (finding_id, object_id, matrix_code, section, parameter_name, unit, status, review_priority, discovery_method, expected_value, actual_value, trigger_text, description, normative, confidence, pd_source, rd_source, comparison, verification)
+       VALUES ($1, $2, NULL, $3, $4, NULL, 'SUSPICION', $5, $6, NULL, NULL, NULL, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb)
+       ON CONFLICT (finding_id) DO UPDATE SET section = EXCLUDED.section, parameter_name = EXCLUDED.parameter_name,
+         status = CASE WHEN findings.status IN ('CANDIDATE', 'CONFIRMED_VIOLATION', 'NEGATIVE_VERIFIED', 'CLARIFICATION_REQUIRED', 'NOT_APPLICABLE', 'NOT_COMPARABLE') THEN findings.status ELSE EXCLUDED.status END,
+         review_priority = EXCLUDED.review_priority, description = EXCLUDED.description, normative = EXCLUDED.normative,
+         confidence = EXCLUDED.confidence, pd_source = EXCLUDED.pd_source, rd_source = EXCLUDED.rd_source,
+         comparison = EXCLUDED.comparison, updated_at = NOW()`,
+      [
+        findingId,
+        objectId,
+        'Вне матрицы',
+        `Гипотеза: ${suspicion.discovery_method}`,
+        suspicion.review_priority,
+        suspicion.discovery_method,
+        suspicion.description,
+        suspicion.normative_base,
+        suspicion.confidence,
+        JSON.stringify(suspicion.pd_source),
+        JSON.stringify(rdSource),
+        JSON.stringify(comparison),
+        JSON.stringify({ inspector_status: 'PENDING' }),
+      ],
+    )
+
+    await client.query(
+      `INSERT INTO suspicions (id, object_id, finding_id, suspicion_id, discovery_method, status, reason, description, confidence, pd_reference, rd_reference, normative_base, review_priority, inspector_status, evidence, dedup_key)
+       VALUES ($1, $2, $3, $4, $5, 'OPEN', $6, $7, $8, $9, $10, $11, $12, 'PENDING', $13::jsonb, $14)
+       ON CONFLICT (object_id, dedup_key) DO UPDATE SET finding_id = EXCLUDED.finding_id,
+         discovery_method = EXCLUDED.discovery_method, reason = EXCLUDED.reason, description = EXCLUDED.description,
+         confidence = EXCLUDED.confidence, pd_reference = EXCLUDED.pd_reference, rd_reference = EXCLUDED.rd_reference,
+         normative_base = EXCLUDED.normative_base, review_priority = EXCLUDED.review_priority, evidence = EXCLUDED.evidence,
+         status = CASE WHEN suspicions.status = 'OPEN' THEN 'OPEN' ELSE suspicions.status END,
+         inspector_status = CASE WHEN suspicions.status = 'OPEN' THEN 'PENDING' ELSE suspicions.inspector_status END,
+         resolved_at = CASE WHEN suspicions.status = 'OPEN' THEN NULL ELSE suspicions.resolved_at END`,
+      [
+        suspicionId,
+        objectId,
+        findingId,
+        suspicionId,
+        suspicion.discovery_method,
+        suspicion.description,
+        suspicion.description,
+        suspicion.confidence,
+        suspicion.pd_reference,
+        suspicion.rd_reference,
+        suspicion.normative_base,
+        suspicion.review_priority,
+        JSON.stringify({ pd_source: suspicion.pd_source, rd_source: rdSource, comparison }),
+        suspicion.dedup_key,
+      ],
+    )
+
+    for (const [stage, source] of [['PD', suspicion.pd_source], ['RD', rdSource.RD], ['ID', rdSource.ID]]) {
+      if (!source?.file_id) continue
+      await client.query(
+        `INSERT INTO evidence_fragments (id, object_id, file_id, finding_id, page, fragment_type, text, bbox)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+         ON CONFLICT (id) DO UPDATE SET page = EXCLUDED.page, text = EXCLUDED.text, bbox = EXCLUDED.bbox`,
+        [`${findingId}-${stage}`, objectId, source.file_id, findingId, source.page ?? null, `SUSPICION_${suspicion.discovery_method}`, source.text || '', JSON.stringify(source.bbox ?? null)],
+      )
+    }
+  }
+  return { suspicionCount: suspicions.length }
+}
+
+export async function runObjectAnalysis({ objectId, processId, req = null, audit = null }) {
+  const started = process.hrtime.bigint()
+  const auditRequest = req || {
+    user: { id: audit?.userId || null },
+    headers: { 'x-forwarded-for': audit?.ipAddress || '', 'user-agent': audit?.userAgent || '' },
+    socket: {},
+  }
   try {
     const [filesResult, parametersResult] = await Promise.all([
       query('SELECT id, stage, name, mime_type, size, sha256, content FROM files WHERE object_id = $1 ORDER BY uploaded_at ASC', [objectId]),
@@ -565,7 +665,14 @@ export async function runObjectAnalysis({ objectId, processId, req }) {
 
     await updateProgress({ objectId, processId, status: 'VERIFYING', step: 'Сопоставление ПД / РД / ИД', progress: 82 })
     const comparisons = parameters.map((parameter) => compareParameter(parameter, documents))
-    const comparisonSummary = await withTransaction(async (client) => persistComparison({ client, objectId, comparisons, documents, parameters }))
+    await updateProgress({ objectId, processId, status: 'VERIFYING', step: 'Формирование гипотез вне Матрицы', progress: 88 })
+    const suspicions = detectSuspicions(documents)
+    const comparisonSummary = await withTransaction(async (client) => {
+      const matrixSummary = await persistComparison({ client, objectId, comparisons, documents, parameters })
+      const suspicionSummary = await persistSuspicions({ client, objectId, suspicions })
+      return { ...matrixSummary, ...suspicionSummary }
+    })
+    recordSuspicions(suspicions)
     const stages = new Set(documents.map((document) => document.file.stage))
     const modelVersion = documents.find((document) => document.result.model?.name)?.result.model.name || 'construction-minilm-132'
 
@@ -579,8 +686,9 @@ export async function runObjectAnalysis({ objectId, processId, req }) {
          process_step = 'Готово', process_progress = 100, process_error = NULL, updated_at = NOW() WHERE id = $3`,
         [scenarioForStages(stages), modelVersion, objectId],
       )
-      await recordAudit(client, { req, objectId, action: 'AI_ANALYSIS_COMPLETED', details: { processId, files: files.length, ...comparisonSummary, modelVersion } })
+      await recordAudit(client, { req: auditRequest, objectId, action: 'AI_ANALYSIS_COMPLETED', details: { processId, files: files.length, ...comparisonSummary, modelVersion } })
     })
+    recordAnalysis('completed', Number(process.hrtime.bigint() - started) / 1e9)
     publishProgress(objectId, {
       process_id: processId,
       process_status: 'READY',
@@ -595,8 +703,9 @@ export async function runObjectAnalysis({ objectId, processId, req }) {
       await client.query(`UPDATE files SET parse_status = 'FAILED', parse_error = $1 WHERE object_id = $2 AND parse_status <> 'COMPLETED'`, [message, objectId]).catch(() => {})
       await client.query(`UPDATE analysis_processes SET status = 'FAILED', current_step = 'Ошибка', error = $1, updated_at = NOW() WHERE process_id = $2`, [message, processId]).catch(() => {})
       await client.query(`UPDATE objects SET process_status = 'FAILED', process_step = 'Ошибка обработки', process_error = $1, updated_at = NOW() WHERE id = $2`, [message, objectId]).catch(() => {})
-      await recordAudit(client, { req, objectId, action: 'AI_ANALYSIS_FAILED', details: { processId, error: message } }).catch(() => {})
+      await recordAudit(client, { req: auditRequest, objectId, action: 'AI_ANALYSIS_FAILED', details: { processId, error: message } }).catch(() => {})
     })
+    recordAnalysis('failed', Number(process.hrtime.bigint() - started) / 1e9)
     publishProgress(objectId, {
       process_id: processId,
       process_status: 'FAILED',
@@ -604,6 +713,6 @@ export async function runObjectAnalysis({ objectId, processId, req }) {
       process_progress: 0,
       process_error: message,
     })
-    console.error(`AI analysis failed for ${objectId}:`, message)
+    logger.error('AI analysis failed', { error, object_id: objectId, process_id: processId })
   }
 }

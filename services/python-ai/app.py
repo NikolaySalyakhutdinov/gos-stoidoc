@@ -7,13 +7,16 @@ import re
 import sys
 import tempfile
 import threading
+import time
 from email.parser import BytesParser
 from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import numpy as np
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -24,7 +27,57 @@ from parser import DocumentParser  # noqa: E402
 from search import ParameterExtractor, SemanticSearch, SourceAwareReranker  # noqa: E402
 
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "@timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record.created)),
+            "service": os.getenv("LOG_SERVICE_NAME", "python-ai"),
+            "environment": os.getenv("NODE_ENV", "development"),
+            "level": record.levelname.lower(),
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["error"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+class LogstashHandler(logging.Handler):
+    def __init__(self, url: str) -> None:
+        super().__init__()
+        self.url = url
+
+    def emit(self, record: logging.LogRecord) -> None:
+        body = self.format(record).encode("utf-8")
+
+        def send() -> None:
+            try:
+                request = Request(self.url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+                with urlopen(request, timeout=1):
+                    pass
+            except Exception:
+                pass
+
+        threading.Thread(target=send, daemon=True).start()
+
+
+def configure_logging() -> None:
+    formatter = JsonFormatter()
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    handlers: list[logging.Handler] = [console]
+    logstash_url = os.getenv("LOGSTASH_URL")
+    if logstash_url:
+        logstash = LogstashHandler(logstash_url)
+        logstash.setFormatter(formatter)
+        handlers.append(logstash)
+    logging.basicConfig(level=logging.INFO, handlers=handlers, force=True)
+
+
+configure_logging()
+
+AI_REQUESTS = Counter("stroynadzor_ai_requests_total", "AI document requests by status", ["status", "stage"])
+AI_DURATION = Histogram("stroynadzor_ai_request_duration_seconds", "AI document processing duration", ["stage"])
+AI_CHUNKS = Counter("stroynadzor_ai_chunks_total", "Searchable chunks produced by the AI parser", ["stage"])
 
 MODEL_PATH = Path(os.getenv("AI_MODEL_PATH", str(BASE_DIR / "models" / "construction-minilm-132")))
 MAX_REQUEST_BYTES = int(os.getenv("AI_MAX_REQUEST_BYTES", str(210 * 1024 * 1024)))
@@ -209,6 +262,22 @@ def process_document(fields: dict[str, str], uploaded: dict[str, object]) -> dic
             stage=stage,
         )
         chunks_path.write_text(json.dumps(chunks_document, ensure_ascii=False), encoding="utf-8")
+        searchable_chunks = [
+            {
+                "id": chunk.get("id"),
+                "text": chunk.get("text"),
+                "page": chunk.get("page"),
+                "bbox": chunk.get("bbox"),
+                "source": chunk.get("source") or file_name,
+                "stage": chunk.get("stage") or stage,
+                "section": chunk.get("section"),
+                "content_kind": chunk.get("content_kind"),
+                "searchable": chunk.get("searchable", True),
+            }
+            for chunk in chunks_document.get("chunks", [])
+            if chunk.get("searchable", True) and chunk.get("content_kind") != "drawing_dimension" and str(chunk.get("text") or "").strip()
+        ][: int(os.getenv("AI_SUSPICION_MAX_CHUNKS", "500"))]
+        AI_CHUNKS.labels(stage=stage).inc(len(searchable_chunks))
 
         results_by_parameter: dict[str, list[dict]] = {}
         parameter_status: dict[str, dict] = {}
@@ -281,6 +350,8 @@ def process_document(fields: dict[str, str], uploaded: dict[str, object]) -> dic
                 "blocks": sum(len(page.get("blocks") or []) for page in pages),
             },
             "chunk_count": int(chunks_document.get("chunk_count", 0)),
+            "searchable_chunks": searchable_chunks,
+            "document_metadata": document_metadata,
             "model": {
                 "name": MODEL_PATH.name,
                 "path": str(MODEL_PATH),
@@ -320,6 +391,14 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if path == "/metrics":
+            body = generate_latest()
+            self.send_response(200)
+            self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_json(404, {"error": "Not found"})
 
     def do_POST(self) -> None:
@@ -327,6 +406,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": "Not found"})
             return
 
+        started = time.monotonic()
+        stage = "unknown"
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
             if content_length <= 0 or content_length > MAX_REQUEST_BYTES:
@@ -334,7 +415,10 @@ class Handler(BaseHTTPRequestHandler):
             content_type = self.headers.get("Content-Type", "")
             body = self.rfile.read(content_length)
             fields, uploaded = parse_multipart(content_type, body)
+            stage = fields.get("stage", "unknown").upper()
             result = process_document(fields, uploaded)
+            AI_REQUESTS.labels(status="completed", stage=stage).inc()
+            AI_DURATION.labels(stage=stage).observe(time.monotonic() - started)
             logging.info(
                 "Processed %s/%s stage=%s chunks=%s",
                 fields.get("object_id"),
@@ -344,8 +428,12 @@ class Handler(BaseHTTPRequestHandler):
             )
             self.send_json(200, result)
         except AiRequestError as error:
+            AI_REQUESTS.labels(status="invalid_request", stage=stage).inc()
+            AI_DURATION.labels(stage=stage).observe(time.monotonic() - started)
             self.send_json(400, {"status": "FAILED", "code": "INVALID_REQUEST", "error": str(error)})
         except Exception as error:  # noqa: BLE001
+            AI_REQUESTS.labels(status="failed", stage=stage).inc()
+            AI_DURATION.labels(stage=stage).observe(time.monotonic() - started)
             logging.exception("AI processing failed")
             self.send_json(500, {"status": "FAILED", "code": "AI_PROCESSING_ERROR", "error": str(error)})
 

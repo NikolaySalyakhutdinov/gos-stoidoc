@@ -4,7 +4,7 @@ import { useVerification } from '../store/VerificationStore'
 import StatusBadge from '../components/StatusBadge'
 import Icon from '../components/Icon'
 import { formatDateTime } from '../utils/helpers'
-import { hasBothComparisonValues } from '../utils/findingFilters'
+import { isReviewableFinding } from '../utils/findingFilters'
 import { PROCESS_STATUS, LOAD_STATUS, SCENARIOS } from '../data/constants'
 
 const PARSE_STEPS = [
@@ -39,7 +39,7 @@ export default function ObjectOverview() {
   const subscribeProgressRef = useRef(subscribeToProgress)
 
   const status = obj?.process_status
-  const findings = obj ? getFindings(id).filter(hasBothComparisonValues) : []
+  const findings = obj ? getFindings(id).filter(isReviewableFinding) : []
   const completeness = obj ? getCompleteness(id) : []
 
   useEffect(() => {

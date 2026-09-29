@@ -20,6 +20,8 @@ WORKDIR /app
 
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-observability.txt ./requirements-observability.txt
+RUN pip install --no-cache-dir -r requirements-observability.txt
 
 COPY app.py ./app.py
 COPY ai_core ./ai_core

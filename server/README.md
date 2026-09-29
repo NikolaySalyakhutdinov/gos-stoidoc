@@ -34,6 +34,9 @@ docker compose up --build
 | `POSTGRES_*` | параметры подключения к PostgreSQL |
 | `CORS_ORIGIN` | разрешённые origin через запятую |
 | `PYTHON_AI_URL` | endpoint AI-пайплайна, по умолчанию `http://python-ai:8000/process` |
+| `RABBITMQ_URL` | RabbitMQ URL; при отсутствии брокера используется прямой fallback |
+| `RABBITMQ_ANALYSIS_QUEUE` | имя очереди анализа, по умолчанию `stroynadzor.analysis` |
+| `LOGSTASH_URL` | HTTP endpoint Logstash для JSON-логов, например `http://logstash:8080` |
 
 ## API
 
@@ -46,11 +49,20 @@ docker compose up --build
 - `GET/POST/DELETE /api/objects` — список, создание и удаление объектов;
 - `PATCH /api/objects/:id/status`;
 - `GET /api/objects/:id/completeness` и `/findings`;
+- `GET /api/objects/:id/suspicions` — гипотезы вне Матрицы с evidence и lifecycle;
 - `POST /api/objects/:id/findings/:findingId/decide` и `/undo`;
 - `GET /api/objects/:id/uploads`;
 - `POST /api/objects/:id/uploads/:stage` — multipart-поле `files`, стадии `PD`, `RD`, `ID`;
 - `DELETE /api/objects/:id/uploads/:stage/:fileId`;
 - `GET /api/matrix` и `GET /api/audit`.
+- `GET /metrics` — Prometheus-метрики API без JWT.
+- `GET /openapi.json` — актуальная спецификация OpenAPI 3.0.3 без JWT.
+
+Все JSON-маршруты проходят обязательную проверку request и response по
+`openapi/openapi.json`. Ошибки схемы возвращаются как JSON с кодом
+`OPENAPI_VALIDATION_ERROR`. Upload-маршруты используют `multipart/form-data`,
+поток `/events` — SSE, просмотр исходного файла — binary, а `/metrics` —
+формат Prometheus; для них сохранены отдельные runtime-проверки и content types.
 
 Добавление и удаление параметров матрицы выполняется через `POST /api/matrix` и
 `DELETE /api/matrix/:id` и доступно только пользователю с ролью `ADMIN`.
@@ -79,6 +91,21 @@ docker compose up --build
 Parameter Extractor. Node.js затем сравнивает подтверждённые значения по стадиям
 ПД/РД/ИД. Если подтверждённого значения нет, finding получает `NOT_FOUND`, а не
 случайный числовой фрагмент из чертежа.
+
+После матричной сверки Node.js запускает четыре независимых детектора гипотез
+вне Матрицы: логические связи, семантический диссонанс, нормативные правила и
+ML-паттерны. Они создают `findings.status = SUSPICION` и запись в `suspicions`
+с `suspicion_id`, методом обнаружения, confidence, описанием, нормативной базой,
+источниками `pd_reference` / `rd_reference` и evidence с `page`/`bbox`/`source`/
+`stage`/`section`. `SUSPICION` не является нарушением; решение инспектора меняет
+её lifecycle на `PROMOTED`, `DISMISSED` или `NEEDS_REVIEW`. Backend запрещает
+прямое подтверждение гипотезы и требует координаты доказательств для перехода в
+`CANDIDATE`. `NOT_APPLICABLE` и `NOT_COMPARABLE` не выставляются AI-пайплайном.
+
+RabbitMQ используется как асинхронный транспорт заданий анализа. Worker
+подтверждает сообщение после завершения пайплайна; при недоступном брокере
+маршрут запускает прежний прямой режим. JSON-логи API и AI могут поступать в
+Logstash, а Prometheus-метрики API и Python собираются готовой конфигурацией.
 
 ## Где находится БД и что в ней хранится
 

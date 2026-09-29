@@ -125,7 +125,31 @@ export function serializeFinding(row, filesById = new Map(), fragmentsByFile = n
     pd_source: pdSource,
     rd_source: rdSource,
     comparison,
+    suspicion: comparison?.suspicion || null,
     verification: jsonValue(row.verification),
+  }
+}
+
+export function serializeSuspicion(row) {
+  if (!row) return null
+  return {
+    suspicion_id: row.suspicion_id || row.id,
+    object_id: row.object_id,
+    finding_id: row.finding_id,
+    discovery_method: row.discovery_method,
+    confidence: row.confidence === null || row.confidence === undefined ? null : Number(row.confidence),
+    description: row.description || row.reason || null,
+    pd_reference: row.pd_reference,
+    rd_reference: row.rd_reference,
+    review_priority: row.review_priority,
+    normative_base: row.normative_base,
+    finding_status: 'SUSPICION',
+    inspector_status: row.inspector_status || 'PENDING',
+    status: row.status,
+    evidence: row.evidence || {},
+    dedup_key: row.dedup_key,
+    created_at: row.created_at,
+    resolved_at: row.resolved_at,
   }
 }
 

@@ -168,6 +168,46 @@ RabbitMQ в `docker-compose.yml` можно использовать как бр
 но он не заменяет канал обновления браузера. Текущий анализ публикует события
 прогресса из Node.js в SSE-поток `/api/objects/:id/events`.
 
+## Метрики, логи и очереди
+
+API публикует Prometheus-метрики на `http://localhost:4000/metrics`, а Python AI
+сервис — на `http://localhost:8000/metrics`. В метриках есть HTTP latency,
+завершённые анализы, RabbitMQ-сообщения и количество гипотез по каждому методу.
+
+Контракт JSON REST API описан в
+[`server/openapi/openapi.json`](server/openapi/openapi.json) как OpenAPI 3.0.3.
+Express проверяет входные JSON-тела, path-параметры, Bearer security и ответы;
+ошибка схемы возвращается с кодом `OPENAPI_VALIDATION_ERROR`. Актуальная схема
+доступна через `GET /openapi.json`. Загрузка файлов, SSE-прогресс, бинарный
+просмотр документов и `/metrics` являются документированными исключениями с
+собственными форматами.
+
+Для локального Grafana/Prometheus и ELK-профиля:
+
+```powershell
+Copy-Item .env.example .env
+# В .env задайте GRAFANA_ADMIN_PASSWORD и LOGSTASH_URL=http://logstash:8080
+docker compose --profile messaging --profile monitoring up --build
+```
+
+После запуска Grafana доступна на `http://localhost:3000`, Prometheus — на
+`http://localhost:9090`, Kibana — на `http://localhost:5601`, Elasticsearch —
+только на `127.0.0.1:9200`, RabbitMQ — на `localhost:15672`. Мониторинг в
+Compose намеренно привязан к localhost; настройки без TLS предназначены только
+для локальной разработки и требуют защищённой конфигурации в production.
+
+Node.js и Python пишут структурированные JSON-логи в stdout. При заданном
+`LOGSTASH_URL` они также отправляются в Logstash и индексируются в Elasticsearch
+для поиска в Kibana.
+
+Гипотезы вне Матрицы создаются только со статусом `SUSPICION` четырьмя методами:
+`LOGICAL_ANALYSIS`, `SEMANTIC_DISSONANCE`, `NORMATIVE_ANALYSIS` и `ML_PATTERN`.
+Они дедуплицируются внутри объекта и набора сопоставимых редакций, не входят в
+число подтверждённых нарушений и не становятся учебной положительной меткой.
+Для перевода в `CANDIDATE` backend требует источники и координаты доказательств;
+прямой переход из `SUSPICION` в `CONFIRMED_VIOLATION` запрещён. Статусы
+`NOT_APPLICABLE` и `NOT_COMPARABLE` выставляются только ручным решением инспектора.
+
 Проверка Python-пайплайна в Docker:
 
 ```powershell

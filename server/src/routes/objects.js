@@ -7,13 +7,15 @@ import { asyncHandler, recordAudit } from '../utils/http.js'
 import { normalizeFilename } from '../utils/filename.js'
 import { runObjectAnalysis } from '../services/aiPipeline.js'
 import { subscribeProgress } from '../services/progressEvents.js'
-import { serializeObject, serializeFinding, findingsSummary, objectColor } from '../utils/serialize.js'
+import { enqueueAnalysis } from '../services/jobQueue.js'
+import { serializeObject, serializeFinding, serializeSuspicion, findingsSummary, objectColor } from '../utils/serialize.js'
 
 const router = Router()
 router.use(requireAuth)
 
 const REASON_CODES = ['WRONG_REVISION', 'APPROVED_CHANGE', 'OCR_ERROR', 'LINK_ERROR', 'NOT_APPLICABLE_PARAM', 'OTHER']
-const DECISION_STATUSES = ['CONFIRMED_VIOLATION', 'NEGATIVE_VERIFIED', 'CLARIFICATION_REQUIRED', 'CANDIDATE', 'NOT_APPLICABLE']
+const DECISION_STATUSES = ['CONFIRMED_VIOLATION', 'NEGATIVE_VERIFIED', 'CLARIFICATION_REQUIRED', 'CANDIDATE', 'NOT_APPLICABLE', 'NOT_COMPARABLE']
+const SUSPICION_METHODS = ['LOGICAL_ANALYSIS', 'SEMANTIC_DISSONANCE', 'NORMATIVE_ANALYSIS', 'ML_PATTERN']
 const PROCESS_STATUSES = ['PENDING', 'PARSING', 'READY', 'VERIFYING', 'COMPLETED', 'FINALIZED', 'FAILED']
 const DOCUMENT_STAGES = ['PD', 'RD', 'ID']
 const DELETE_REASONS = {
@@ -22,6 +24,14 @@ const DELETE_REASONS = {
   WRONG_DATA: 'Ошибка в данных объекта',
   PROJECT_CANCELLED: 'Объект больше не ведётся',
   OTHER: 'Другое',
+}
+
+function suspicionHasEvidenceCoordinates(finding) {
+  const rdSources = finding.rd_source && typeof finding.rd_source === 'object'
+    ? [finding.rd_source.RD, finding.rd_source.ID]
+    : [finding.rd_source]
+  const sources = [finding.pd_source, ...rdSources].filter(Boolean)
+  return sources.length > 0 && sources.every((source) => source.file_id && (source.page || source.bbox || source.chunk_id))
 }
 const MAX_FILE_SIZE = 50 * 1024 * 1024
 const MAX_BATCH_SIZE = 200 * 1024 * 1024
@@ -203,7 +213,10 @@ router.patch('/:id/status', asyncHandler(async (req, res) => {
     return updated.rows[0]
   })
   if (status === 'PARSING') {
-    setImmediate(() => runObjectAnalysis({ objectId: row.id, processId, req }))
+    setImmediate(async () => {
+      const enqueued = await enqueueAnalysis({ objectId: row.id, processId })
+      if (!enqueued) await runObjectAnalysis({ objectId: row.id, processId, req })
+    })
   }
   res.json({ object: await serializeObjectWithSummary(result) })
 }))
@@ -215,6 +228,14 @@ router.get('/:id/completeness', asyncHandler(async (req, res) => {
 
 router.get('/:id/findings', asyncHandler(async (req, res) => {
   res.json({ findings: await getFindings(req.params.id) })
+}))
+
+router.get('/:id/suspicions', asyncHandler(async (req, res) => {
+  const result = await query(
+    'SELECT * FROM suspicions WHERE object_id = $1 ORDER BY created_at DESC',
+    [req.params.id],
+  )
+  res.json({ suspicions: result.rows.map(serializeSuspicion) })
 }))
 
 router.get('/:id/files/:fileId/content', asyncHandler(async (req, res) => {
@@ -240,10 +261,25 @@ router.post('/:id/findings/:findingId/decide', asyncHandler(async (req, res) => 
   const result = await query('SELECT * FROM findings WHERE finding_id = $1 AND object_id = $2', [req.params.findingId, req.params.id])
   const finding = result.rows[0]
   if (!finding) return res.status(404).json({ error: 'Запись не найдена' })
+  if (finding.status === 'SUSPICION' && status === 'CONFIRMED_VIOLATION') {
+    return res.status(409).json({ error: 'SUSPICION сначала должна быть переведена инспектором в CANDIDATE с привязанными доказательствами' })
+  }
+  if (finding.status === 'SUSPICION' && status === 'CANDIDATE' && !suspicionHasEvidenceCoordinates(finding)) {
+    return res.status(409).json({ error: 'Для перевода SUSPICION в CANDIDATE нужны источники и координаты доказательств' })
+  }
 
-  const verification = { decision: status, status, reason_code: reason_code || null, comment: comment || '', user: req.user.name, timestamp: new Date().toISOString() }
+  const suspicionDecision = SUSPICION_METHODS.includes(finding.discovery_method)
+    ? status === 'CANDIDATE' ? 'PROMOTED' : ['NEGATIVE_VERIFIED', 'NOT_APPLICABLE', 'NOT_COMPARABLE'].includes(status) ? 'DISMISSED' : 'NEEDS_REVIEW'
+    : null
+  const verification = { decision: status, status, inspector_status: suspicionDecision || undefined, reason_code: reason_code || null, comment: comment || '', user: req.user.name, timestamp: new Date().toISOString() }
   const updated = await withTransaction(async (client) => {
     const next = await client.query('UPDATE findings SET status = $1, verification = $2::jsonb, updated_at = NOW() WHERE finding_id = $3 RETURNING *', [status, JSON.stringify(verification), finding.finding_id])
+    if (suspicionDecision) {
+      await client.query(
+        `UPDATE suspicions SET status = $1, inspector_status = $2, resolved_at = CASE WHEN $1 = 'NEEDS_REVIEW' THEN NULL ELSE NOW() END WHERE finding_id = $3`,
+        [suspicionDecision, status, finding.finding_id],
+      )
+    }
     await recordAudit(client, { req, objectId: req.params.id, findingId: finding.finding_id, action: 'FINDING_DECIDED', details: { status, reasonCode: reason_code || null, comment: comment || '' } })
     return next.rows[0]
   })
@@ -257,6 +293,9 @@ router.post('/:id/findings/:findingId/undo', asyncHandler(async (req, res) => {
   const resetStatus = finding.matrix_code ? 'CANDIDATE' : 'SUSPICION'
   const updated = await withTransaction(async (client) => {
     const next = await client.query('UPDATE findings SET status = $1, verification = NULL, updated_at = NOW() WHERE finding_id = $2 RETURNING *', [resetStatus, finding.finding_id])
+    if (resetStatus === 'SUSPICION') {
+      await client.query(`UPDATE suspicions SET status = 'OPEN', inspector_status = 'PENDING', resolved_at = NULL WHERE finding_id = $1`, [finding.finding_id])
+    }
     await recordAudit(client, { req, objectId: req.params.id, findingId: finding.finding_id, action: 'FINDING_UNDO', details: { status: resetStatus } })
     return next.rows[0]
   })

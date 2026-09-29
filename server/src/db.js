@@ -1,6 +1,7 @@
 import pg from 'pg'
 import 'dotenv/config'
 import matrixData from './data/matrix.json' with { type: 'json' }
+import { logger } from './observability/logger.js'
 
 const { Pool } = pg
 
@@ -21,7 +22,7 @@ export const pool = new Pool({
 })
 
 pool.on('error', (error) => {
-  console.error('PostgreSQL pool error', error)
+  logger.error('PostgreSQL pool error', { error })
 })
 
 export function query(text, params) {
@@ -222,9 +223,19 @@ export async function initDatabase() {
       id TEXT PRIMARY KEY,
       object_id TEXT NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
       finding_id TEXT REFERENCES findings(finding_id) ON DELETE CASCADE,
+      suspicion_id TEXT,
+      discovery_method TEXT NOT NULL DEFAULT 'LOGICAL_ANALYSIS',
       status TEXT NOT NULL DEFAULT 'OPEN',
       reason TEXT,
+      description TEXT,
       confidence NUMERIC,
+      pd_reference TEXT,
+      rd_reference TEXT,
+      normative_base TEXT,
+      review_priority TEXT,
+      inspector_status TEXT NOT NULL DEFAULT 'PENDING',
+      evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+      dedup_key TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       resolved_at TIMESTAMPTZ
     );
@@ -325,6 +336,19 @@ export async function initDatabase() {
     ALTER TABLE files ADD COLUMN IF NOT EXISTS page_count INTEGER;
     ALTER TABLE findings ADD COLUMN IF NOT EXISTS comparison JSONB;
     ALTER TABLE analysis_processes ADD COLUMN IF NOT EXISTS error TEXT;
+    ALTER TABLE suspicions ADD COLUMN IF NOT EXISTS suspicion_id TEXT;
+    ALTER TABLE suspicions ADD COLUMN IF NOT EXISTS discovery_method TEXT NOT NULL DEFAULT 'LOGICAL_ANALYSIS';
+    ALTER TABLE suspicions ADD COLUMN IF NOT EXISTS description TEXT;
+    ALTER TABLE suspicions ADD COLUMN IF NOT EXISTS pd_reference TEXT;
+    ALTER TABLE suspicions ADD COLUMN IF NOT EXISTS rd_reference TEXT;
+    ALTER TABLE suspicions ADD COLUMN IF NOT EXISTS normative_base TEXT;
+    ALTER TABLE suspicions ADD COLUMN IF NOT EXISTS review_priority TEXT;
+    ALTER TABLE suspicions ADD COLUMN IF NOT EXISTS inspector_status TEXT NOT NULL DEFAULT 'PENDING';
+    ALTER TABLE suspicions ADD COLUMN IF NOT EXISTS evidence JSONB NOT NULL DEFAULT '{}'::jsonb;
+    ALTER TABLE suspicions ADD COLUMN IF NOT EXISTS dedup_key TEXT;
+    UPDATE suspicions SET suspicion_id = id WHERE suspicion_id IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_suspicions_object_dedup ON suspicions(object_id, dedup_key);
+    CREATE INDEX IF NOT EXISTS idx_suspicions_object_status ON suspicions(object_id, status);
   `)
 
   const seedMarker = await query("SELECT value FROM system_settings WHERE key = 'matrix_v1.1_seeded'")
@@ -344,4 +368,17 @@ export async function initDatabase() {
       )
     })
   }
+
+  await query(
+    `INSERT INTO logical_rules (id, code, version, definition)
+     VALUES ($1, $2, $3, $4::jsonb)
+     ON CONFLICT (code) DO NOTHING`,
+    ['rule-floors-lift-v1', 'FLOORS_GT_10_REQUIRES_LIFT', '1.0', JSON.stringify({ when: { floors: { gt: 10 } }, require: ['lift', 'lift_shaft'], discovery_method: 'LOGICAL_ANALYSIS' })],
+  )
+  await query(
+    `INSERT INTO normative_base (id, code, title, version, content)
+     VALUES ($1, $2, $3, $4, $5::jsonb)
+     ON CONFLICT (id) DO NOTHING`,
+    ['norm-room-height-v1', 'ROOM_HEIGHT_MIN_2_5M', 'Минимальная высота помещений', 'configured-1.0', JSON.stringify({ threshold_m: 2.5, unit: 'м', review_required: true, discovery_method: 'NORMATIVE_ANALYSIS' })],
+  )
 }

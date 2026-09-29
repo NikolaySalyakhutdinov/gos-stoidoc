@@ -21,3 +21,17 @@ export function hasBothComparisonValues(finding) {
 
   return hasValue(finding?.expected_value) && hasValue(finding?.actual_value)
 }
+
+export function isReviewableFinding(finding) {
+  if (finding?.status === 'SUSPICION') {
+    const sources = [
+      finding.comparison?.left_source,
+      finding.comparison?.right_source,
+      finding.pd_source,
+      finding.rd_source?.RD,
+      finding.rd_source?.ID,
+    ]
+    return sources.some((source) => source && (source.file_id || String(source.text || '').trim()))
+  }
+  return hasBothComparisonValues(finding)
+}

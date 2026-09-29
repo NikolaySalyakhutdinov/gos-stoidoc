@@ -4,7 +4,7 @@ import { useVerification } from '../store/VerificationStore'
 import StatusBadge from '../components/StatusBadge'
 import Icon from '../components/Icon'
 import { FINDING_STATUS, LOAD_STATUS, SCENARIOS } from '../data/constants'
-import { hasBothComparisonValues } from '../utils/findingFilters'
+import { isReviewableFinding } from '../utils/findingFilters'
 
 const TABS = [
   { key: 'completeness', label: 'Комплектность', statuses: [] },
@@ -34,7 +34,7 @@ export default function Protocol() {
 
   const status = obj?.process_status
   const findings = getFindings(id)
-  const comparableFindings = findings.filter(hasBothComparisonValues)
+  const comparableFindings = findings.filter(isReviewableFinding)
   const completeness = getCompleteness(id)
 
   const counts = useMemo(() => {

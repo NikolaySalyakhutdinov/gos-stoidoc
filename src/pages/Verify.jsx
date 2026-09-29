@@ -5,7 +5,7 @@ import StatusBadge from '../components/StatusBadge'
 import Icon from '../components/Icon'
 import { FINDING_STATUS, REASON_CODES, DISCOVERY_METHODS } from '../data/constants'
 import { formatDateTime } from '../utils/helpers'
-import { hasBothComparisonValues } from '../utils/findingFilters'
+import { isReviewableFinding } from '../utils/findingFilters'
 import { apiFetchBlob } from '../api/client'
 
 export default function Verify() {
@@ -23,7 +23,7 @@ export default function Verify() {
   }, [id, ensureObjects, ensureFindings])
 
   const allFindings = getFindings(id)
-  const findings = allFindings.filter(hasBothComparisonValues)
+  const findings = allFindings.filter(isReviewableFinding)
   const idx = findings.findIndex((f) => f.finding_id === findingId)
   const f = findings[idx]
   const hiddenFinding = allFindings.find((finding) => finding.finding_id === findingId)
@@ -58,7 +58,7 @@ export default function Verify() {
     }
   }, [id, comparison.leftSource, comparison.rightSource])
 
-  const isDecided = f && ['CONFIRMED_VIOLATION', 'NEGATIVE_VERIFIED', 'NOT_APPLICABLE'].includes(f.status) && f.verification
+  const isDecided = f && ['CONFIRMED_VIOLATION', 'NEGATIVE_VERIFIED', 'NOT_APPLICABLE', 'NOT_COMPARABLE'].includes(f.status) && f.verification
 
   const openReasonPanel = (m) => {
     setMode(m)
@@ -94,6 +94,10 @@ export default function Verify() {
 
   function rejectSuspicion() {
     decide(id, f.finding_id, { status: 'NEGATIVE_VERIFIED', reason_code: 'OTHER', comment: 'Гипотеза не подтвердилась при проверке.' })
+  }
+
+  function markManualStatus(status, reason_code, comment) {
+    decide(id, f.finding_id, { status, reason_code, comment })
   }
 
   return (
@@ -181,6 +185,12 @@ export default function Verify() {
               <button className="btn btn-danger" onClick={rejectSuspicion}>
                 <Icon name="x" size={14} /> Отклонить гипотезу
               </button>
+              <button className="btn" onClick={() => markManualStatus('NOT_APPLICABLE', 'NOT_APPLICABLE_PARAM', 'Параметр признан инспектором неприменимым к объекту.')}>
+                Неприменимо
+              </button>
+              <button className="btn" onClick={() => markManualStatus('NOT_COMPARABLE', 'LINK_ERROR', 'Источники признаны инспектором несопоставимыми.')}>
+                Несопоставимо
+              </button>
             </div>
           </>
         ) : (
@@ -197,6 +207,12 @@ export default function Verify() {
                 </button>
                 <button className="btn" onClick={() => openReasonPanel('clarify')}>
                   <Icon name="question" size={14} /> Требует уточнения
+                </button>
+                <button className="btn" onClick={() => markManualStatus('NOT_APPLICABLE', 'NOT_APPLICABLE_PARAM', 'Параметр признан инспектором неприменимым к объекту.')}>
+                  Неприменимо
+                </button>
+                <button className="btn" onClick={() => markManualStatus('NOT_COMPARABLE', 'LINK_ERROR', 'Источники признаны инспектором несопоставимыми.')}>
+                  Несопоставимо
                 </button>
               </div>
             )}

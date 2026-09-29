@@ -1,6 +1,7 @@
 import undici from 'undici'
 import { File } from 'node:buffer'
 import { normalizeFilename } from '../utils/filename.js'
+import { logger } from '../observability/logger.js'
 
 const { Agent, fetch, FormData } = undici
 
@@ -43,9 +44,7 @@ export async function processDocumentWithAi({
 
   form.append('file', uploadedFile)
 
-  console.log(
-      `AI request started: stage=${file.stage}, file=${fileName}, timeout=${AI_TIMEOUT_MS}ms`
-  )
+  logger.info('AI request started', { stage: file.stage, file: fileName, timeout_ms: AI_TIMEOUT_MS })
 
   try {
     const response = await fetch(url, {
@@ -55,16 +54,14 @@ export async function processDocumentWithAi({
       signal: AbortSignal.timeout(AI_TIMEOUT_MS),
     })
 
-    console.log(
-        `AI response received: stage=${file.stage}, file=${fileName}, HTTP=${response.status}`
-    )
+    logger.info('AI response received', { stage: file.stage, file: fileName, status_code: response.status })
 
     let payload = null
 
     try {
       payload = await response.json()
     } catch (error) {
-      console.error('Failed to parse Python AI response:', error)
+      logger.error('Failed to parse Python AI response', { error })
     }
 
     if (!response.ok || payload?.status === 'FAILED') {
@@ -76,11 +73,11 @@ export async function processDocumentWithAi({
 
     return payload
   } catch (error) {
-    console.error('Python AI request failed:', {
+    logger.error('Python AI request failed', {
+      error,
       name: error?.name,
-      message: error?.message,
-      causeCode: error?.cause?.code,
-      causeMessage: error?.cause?.message,
+      cause_code: error?.cause?.code,
+      cause_message: error?.cause?.message,
     })
 
     throw error
