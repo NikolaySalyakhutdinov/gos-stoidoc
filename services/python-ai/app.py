@@ -21,7 +21,7 @@ sys.path.insert(0, str(BASE_DIR / "ai_core"))
 
 from chunker import DocumentChunker  # noqa: E402
 from parser import DocumentParser  # noqa: E402
-from search import SemanticSearch  # noqa: E402
+from search import ParameterExtractor, SemanticSearch, SourceAwareReranker  # noqa: E402
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -29,19 +29,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 MODEL_PATH = Path(os.getenv("AI_MODEL_PATH", str(BASE_DIR / "models" / "construction-minilm-132")))
 MAX_REQUEST_BYTES = int(os.getenv("AI_MAX_REQUEST_BYTES", str(210 * 1024 * 1024)))
 OCR_DPI = int(os.getenv("AI_OCR_DPI", "250"))
-SEARCH_TOP_K = int(os.getenv("AI_SEARCH_TOP_K", "12"))
+SEARCH_TOP_K = int(os.getenv("AI_SEARCH_TOP_K", "20"))
+SEARCH_RERANK_TOP_K = int(os.getenv("AI_SEARCH_RERANK_TOP_K", "12"))
 SEARCH_LEXICAL_WEIGHT = float(os.getenv("AI_SEARCH_LEXICAL_WEIGHT", "0.25"))
 SEARCH_ANCHOR_WEIGHT = float(os.getenv("AI_SEARCH_ANCHOR_WEIGHT", "0.45"))
 SEARCH_MIN_ANCHOR_SCORE = float(os.getenv("AI_SEARCH_MIN_ANCHOR_SCORE", "0.14"))
-MAX_REQUEST_BYTES = int(
-    os.getenv(
-        "AI_MAX_REQUEST_BYTES",
-        str(50 * 1024 * 1024)
-    )
-)
-
 _engine: SemanticSearch | None = None
 _engine_lock = threading.RLock()
+_reranker = SourceAwareReranker()
+_extractor = ParameterExtractor()
 
 
 class AiRequestError(ValueError):
@@ -150,12 +146,18 @@ def parse_queries(raw: str) -> list[dict]:
         trigger = str(item.get("trigger", "")).strip()
         source = str(item.get("source", "")).strip()
         section = str(item.get("section", "")).strip()
+        unit = str(item.get("unit", "")).strip()
         if not code or not parameter:
             continue
         queries.append({
             "code": code,
-            "text": ". ".join(part for part in (parameter, section, source, trigger) if part),
-                "anchor": parameter,
+            "parameter": parameter,
+            "unit": unit,
+            "section": section,
+            "source": source,
+            "trigger": trigger,
+            "text": ". ".join(part for part in (parameter, unit, section, source, trigger) if part),
+            "anchor": parameter,
         })
     return queries
 
@@ -176,6 +178,8 @@ def process_document(fields: dict[str, str], uploaded: dict[str, object]) -> dic
         raise AiRequestError("Файл пустой")
 
     queries = parse_queries(fields.get("queries", ""))
+    for item in queries:
+        item["stage"] = stage
 
     with tempfile.TemporaryDirectory(prefix="stroynadzor-ai-") as temp_dir:
         work_dir = Path(temp_dir)
@@ -185,7 +189,11 @@ def process_document(fields: dict[str, str], uploaded: dict[str, object]) -> dic
         input_path.write_bytes(file_content)
 
         parser = DocumentParser(dpi=OCR_DPI)
-        parsed_document = parser.parse(str(input_path))
+        parsed_document = parser.parse(
+            str(input_path),
+            source=file_name,
+            stage=stage,
+        )
         document_metadata = extract_document_metadata(file_name, parsed_document)
         chunker = DocumentChunker(
             chunk_size=700,
@@ -195,12 +203,18 @@ def process_document(fields: dict[str, str], uploaded: dict[str, object]) -> dic
             min_words=8,
             min_ocr_confidence=0.0,
         )
-        chunks_document = chunker.chunk(parsed_document)
+        chunks_document = chunker.chunk(
+            parsed_document,
+            source=file_name,
+            stage=stage,
+        )
         chunks_path.write_text(json.dumps(chunks_document, ensure_ascii=False), encoding="utf-8")
 
         results_by_parameter: dict[str, list[dict]] = {}
+        parameter_status: dict[str, dict] = {}
+        search_diagnostics: dict[str, dict] = {}
         embedding_dim = None
-        if chunks_document.get("chunks") and queries:
+        if queries and chunks_document.get("chunks"):
             # Sentence-Transformers keeps mutable chunk/index state, so one request
             # at a time uses the shared loaded model.
             with _engine_lock:
@@ -209,7 +223,7 @@ def process_document(fields: dict[str, str], uploaded: dict[str, object]) -> dic
                 embeddings = engine.build_index(cache_path=index_path, force=True)
                 embedding_dim = int(np.asarray(embeddings).shape[1])
                 for item in queries:
-                    results_by_parameter[item["code"]] = engine.search(
+                    semantic_candidates = engine.search(
                         item["text"],
                         top_k=SEARCH_TOP_K,
                         hybrid=True,
@@ -218,6 +232,37 @@ def process_document(fields: dict[str, str], uploaded: dict[str, object]) -> dic
                         anchor_weight=SEARCH_ANCHOR_WEIGHT,
                         min_anchor_score=SEARCH_MIN_ANCHOR_SCORE,
                     )
+                    reranked = _reranker.rerank(
+                        semantic_candidates,
+                        item,
+                        top_k=SEARCH_RERANK_TOP_K,
+                    )
+                    extracted = _extractor.extract(item, reranked["results"])
+                    results_by_parameter[item["code"]] = extracted
+                    parameter_status[item["code"]] = {
+                        "status": "FOUND" if extracted else "NOT_FOUND",
+                        "reason": None if extracted else "no_confirmed_value",
+                        "candidate_count": len(semantic_candidates),
+                        "reranked_count": len(reranked["results"]),
+                        "extracted_count": len(extracted),
+                    }
+                    search_diagnostics[item["code"]] = {
+                        "miniLM_top_k": SEARCH_TOP_K,
+                        "semantic_count": len(semantic_candidates),
+                        "reranked_count": len(reranked["results"]),
+                        "rejected_count": len(reranked["rejected"]),
+                        "rejected_reasons": reranked["rejected"][:10],
+                    }
+        else:
+            for item in queries:
+                results_by_parameter[item["code"]] = []
+                parameter_status[item["code"]] = {
+                    "status": "NOT_FOUND",
+                    "reason": "no_searchable_chunks",
+                    "candidate_count": 0,
+                    "reranked_count": 0,
+                    "extracted_count": 0,
+                }
 
         for evidence_list in results_by_parameter.values():
             for evidence in evidence_list:
@@ -241,8 +286,13 @@ def process_document(fields: dict[str, str], uploaded: dict[str, object]) -> dic
                 "path": str(MODEL_PATH),
                 "embedding_dim": embedding_dim,
                 "search": "semantic+lexical+anchor",
+                "pipeline": "Parser v2 -> Chunker v3 -> MiniLM TOP-20 -> source-aware reranker -> Parameter Extractor -> Comparator",
+                "semantic_top_k": SEARCH_TOP_K,
+                "rerank_top_k": SEARCH_RERANK_TOP_K,
             },
             "results_by_parameter": results_by_parameter,
+            "parameter_status": parameter_status,
+            "search_diagnostics": search_diagnostics,
         }
 
 

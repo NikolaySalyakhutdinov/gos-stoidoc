@@ -90,6 +90,11 @@ class SemanticSearch:
         for index, item in enumerate(raw_chunks):
             if not isinstance(item, dict):
                 continue
+            # Layout-only drawing blocks remain in chunks.json for traceability
+            # but never enter the MiniLM corpus. This prevents dimensions from
+            # competing with prose/table evidence.
+            if item.get("searchable") is False:
+                continue
 
             text = self._normalize_space(str(item.get("text", "")))
             if not text:

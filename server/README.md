@@ -33,7 +33,7 @@ docker compose up --build
 | `JWT_SECRET` | секрет подписи JWT; для production задаётся явно |
 | `POSTGRES_*` | параметры подключения к PostgreSQL |
 | `CORS_ORIGIN` | разрешённые origin через запятую |
-| `PYTHON_AI_URL` | endpoint будущего Python-сервиса, по умолчанию `http://python-ai:8000/process` |
+| `PYTHON_AI_URL` | endpoint AI-пайплайна, по умолчанию `http://python-ai:8000/process` |
 
 ## API
 
@@ -75,7 +75,10 @@ docker compose up --build
 `AI_UNAVAILABLE` и может быть повторно обработана будущим worker-сервисом.
 
 `services/python-ai` — полностью запускаемый HTTP-контейнер на Python 3.11 slim.
-Он только принимает контракт `/process` и отвечает `202`; алгоритмов ИИ в нём нет.
+Он выполняет Parser v2 → Chunker v3 → MiniLM TOP-20 → source-aware reranker →
+Parameter Extractor. Node.js затем сравнивает подтверждённые значения по стадиям
+ПД/РД/ИД. Если подтверждённого значения нет, finding получает `NOT_FOUND`, а не
+случайный числовой фрагмент из чертежа.
 
 ## Где находится БД и что в ней хранится
 

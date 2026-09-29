@@ -3,7 +3,9 @@ from docx import Document
 
 class DOCXParser:
 
-    def parse(self, file_path: str):
+    def parse(self, file_path: str, *, metadata: dict | None = None):
+
+        metadata = dict(metadata or {})
 
         document = Document(file_path)
 
@@ -28,7 +30,10 @@ class DOCXParser:
 
                 "index": index,
 
-                "text": text
+                "text": text,
+                "source_kind": "paragraph",
+                "page": None,
+                "bbox": None,
             })
 
         # --------------------------
@@ -56,7 +61,8 @@ class DOCXParser:
 
                 "table": table_index,
 
-                "rows": rows
+                "rows": rows,
+                "source_kind": "table",
             })
 
         full_text = "\n".join(
@@ -67,6 +73,14 @@ class DOCXParser:
         return {
 
             "type": "docx",
+
+            "schema_version": metadata.get("schema_version", "parser-v2"),
+
+            "source": metadata.get("source") or file_path,
+
+            "stage": metadata.get("stage"),
+
+            "section": metadata.get("section"),
 
             "text": full_text,
 

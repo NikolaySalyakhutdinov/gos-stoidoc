@@ -78,7 +78,7 @@ export default function ObjectOverview() {
   const confirmed = findings.filter((f) => f.status === 'CONFIRMED_VIOLATION').length
   const candidates = findings.filter((f) => ['CANDIDATE', 'PENDING'].includes(f.status)).length
   const negative = findings.filter((f) => f.status === 'NEGATIVE_VERIFIED').length
-  const missing = findings.filter((f) => ['MISSING_EVIDENCE', 'NOT_APPLICABLE', 'NOT_COMPARABLE', 'CLARIFICATION_REQUIRED'].includes(f.status)).length
+  const missing = findings.filter((f) => ['MISSING_EVIDENCE', 'NOT_FOUND', 'NOT_APPLICABLE', 'NOT_COMPARABLE', 'CLARIFICATION_REQUIRED'].includes(f.status)).length
   const suspicion = findings.filter((f) => f.status === 'SUSPICION').length
 
   async function runAnalysis() {

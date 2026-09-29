@@ -3,7 +3,9 @@ import xml.etree.ElementTree as ET
 
 class XMLParser:
 
-    def parse(self, file_path: str):
+    def parse(self, file_path: str, *, metadata: dict | None = None):
+
+        metadata = dict(metadata or {})
 
         tree = ET.parse(file_path)
 
@@ -14,6 +16,14 @@ class XMLParser:
         return {
 
             "type": "xml",
+
+            "schema_version": metadata.get("schema_version", "parser-v2"),
+
+            "source": metadata.get("source") or file_path,
+
+            "stage": metadata.get("stage"),
+
+            "section": metadata.get("section"),
 
             "root": root.tag,
 

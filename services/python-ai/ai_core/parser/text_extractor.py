@@ -8,6 +8,7 @@ def extract_blocks(page):
             text = str(block[4]).strip()
             if not text:
                 continue
+            block_type = int(block[6]) if len(block) > 6 else 0
             blocks.append({
                 "bbox": [
                     block[0],
@@ -15,7 +16,9 @@ def extract_blocks(page):
                     block[2],
                     block[3]
                 ],
-                "text": text
+                "text": text,
+                "block_type": block_type,
+                "source_kind": "image" if block_type == 1 else "text",
             })
 
     return blocks

@@ -23,6 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py ./app.py
 COPY ai_core ./ai_core
+COPY tests ./tests
 COPY models ./models
 
 # Fail the image build early if the archived model was copied without a

@@ -67,6 +67,8 @@ class OCREngine:
                     max(box[3] for box in boxes),
                 ],
                 "confidence": sum(line["confidence"]) / len(line["confidence"]),
+                "block_type": 0,
+                "source_kind": "text",
             })
 
         return result

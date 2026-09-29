@@ -61,16 +61,26 @@ class PDFParser:
 
         return img
 
-    def parse(self, file_path: str | None = None):
+    def parse(
+        self,
+        file_path: str | None = None,
+        *,
+        metadata: dict | None = None,
+    ):
         path = file_path or self.path
         if not path:
             raise ValueError("Не указан путь к PDF-файлу")
 
         doc = fitz.open(path)
 
+        metadata = dict(metadata or {})
         result = {
             "type": "pdf",
             "document": path,
+            "schema_version": metadata.get("schema_version", "parser-v2"),
+            "source": metadata.get("source") or path,
+            "stage": metadata.get("stage"),
+            "section": metadata.get("section"),
             "pages": []
         }
 
@@ -81,6 +91,7 @@ class PDFParser:
                 text = "\n".join(
                     block["text"]
                     for block in blocks
+                    if block.get("source_kind") != "image"
                 )
 
                 valid, quality, reason = check_text(text)
@@ -94,11 +105,19 @@ class PDFParser:
                     method = "ocr"
                     if not text.strip():
                         text = self.ocr.recognize(image)
-                        blocks = [{"bbox": None, "text": text}]
+                    blocks = [{
+                        "bbox": None,
+                        "text": text,
+                        "block_type": 0,
+                        "source_kind": "text",
+                    }]
                     valid, quality, reason = check_text(text)
 
                 result["pages"].append({
                     "page": number,
+                    "source": result["source"],
+                    "stage": result["stage"],
+                    "section": result["section"],
                     "method": method,
                     "quality": quality,
                     "reason": reason,

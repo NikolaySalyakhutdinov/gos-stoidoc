@@ -32,7 +32,14 @@ function tokens(text) {
   )
 }
 
-function comparableValues(text) {
+function comparableValues(evidenceOrText) {
+  if (evidenceOrText && typeof evidenceOrText === 'object') {
+    const normalized = evidenceOrText.normalized_value
+      || evidenceOrText.extracted_value
+      || evidenceOrText.value
+    if (normalized) return new Set([String(normalized).toLocaleLowerCase('ru-RU')])
+  }
+  const text = typeof evidenceOrText === 'string' ? evidenceOrText : evidenceOrText?.text
   return new Set([...tokens(text)].filter((value) => /\d/.test(value)))
 }
 
@@ -100,8 +107,8 @@ function pairPriority(leftStage, rightStage) {
 }
 
 function comparePair(leftStage, rightStage, left, right) {
-  const leftValues = comparableValues(left?.text)
-  const rightValues = comparableValues(right?.text)
+  const leftValues = comparableValues(left)
+  const rightValues = comparableValues(right)
   const sharedValues = [...leftValues].filter((value) => rightValues.has(value))
   const relation = !leftValues.size || !rightValues.size
     ? 'UNCERTAIN'
@@ -122,7 +129,7 @@ function comparePair(leftStage, rightStage, left, right) {
 }
 
 function candidateValueKey(evidence) {
-  const values = [...comparableValues(evidence?.text)].sort()
+  const values = [...comparableValues(evidence)].sort()
   return values.length ? values.join('|') : null
 }
 
@@ -214,6 +221,7 @@ function evidenceCandidates(documents, stage, parameter) {
   const unique = []
   const keys = new Set()
   for (const candidate of candidates) {
+    if (candidate.status && candidate.status !== 'CONFIRMED' && candidate.extraction_status !== 'CONFIRMED') continue
     const relevance = anchorRelevance(candidate, parameter, stage)
     if (!relevance) continue
     const key = [candidate.file.id, candidate.page || '', candidateValueKey(candidate) || String(candidate.text || '').slice(0, 180)].join(':')
@@ -234,16 +242,25 @@ function evidenceForFinding(evidence, parameter = null) {
     file_size: Number(evidence.file.size || 0),
     mime_type: evidence.file.mime_type || null,
     sha256: evidence.file.sha256 || null,
-    stage: evidence.file.stage,
     page_count: Number(evidence.file.page_count || 0) || null,
     page: evidence.page ?? evidence.metadata?.page ?? null,
-    section: parameter?.section || null,
-    source_hint: parameter ? stageSource(parameter, evidence.file.stage) || null : null,
     document_code: evidence.document_code ?? documentMetadata.document_code ?? null,
     bbox: evidence.bbox ?? null,
     text: truncate(evidence.text, 900),
     semantic_score: evidence.semantic_score ?? null,
     rank_score: evidence.rank_score ?? null,
+    source: evidence.source ?? evidence.file.name ?? null,
+    source_hint: evidence.source_hint ?? (parameter ? stageSource(parameter, evidence.file.stage) || null : null),
+    stage: evidence.stage ?? evidence.file.stage,
+    section: evidence.section ?? parameter?.section ?? null,
+    chunk_id: evidence.id ?? evidence.chunk_id ?? null,
+    content_kind: evidence.content_kind ?? null,
+    extracted_value: evidence.extracted_value ?? evidence.value ?? null,
+    normalized_value: evidence.normalized_value ?? null,
+    unit: evidence.unit ?? parameter?.unit ?? null,
+    extractor: evidence.extractor ?? null,
+    extraction_status: evidence.extraction_status ?? evidence.status ?? null,
+    rerank_score: evidence.rerank_score ?? null,
   }
 }
 
@@ -261,7 +278,17 @@ function serializeComparison(pair, parameter = null) {
   }
 }
 
-function buildFindingOccurrence(parameter, pair, candidates, comparisonStages) {
+function extractedDisplayValue(evidence) {
+  if (!evidence) return null
+  return evidence.extracted_value || evidence.value || truncate(evidence.text, 900)
+}
+
+function parameterStageStatus(documents, stage, code) {
+  const document = documents.find((item) => item.file.stage === stage)
+  return document?.result?.parameter_status?.[code]?.status || null
+}
+
+function buildFindingOccurrence(parameter, pair, candidates, comparisonStages, documents) {
   const evidence = Object.fromEntries(STAGES.map((stage) => [stage, candidates[stage]?.[0] || null]))
   if (pair) {
     evidence[pair.leftStage] = pair.left
@@ -273,12 +300,22 @@ function buildFindingOccurrence(parameter, pair, candidates, comparisonStages) {
   const expectedStages = requiredStages.length ? requiredStages : comparisonStages
   const comparisonEvidence = expectedStages.map((stage) => evidence[stage]).filter(Boolean)
   const snippets = Object.fromEntries(STAGES.map((stage) => [stage, evidence[stage] ? truncate(evidence[stage].text, 900) : null]))
-  const scoreValues = presentStages.map((stage) => Number(evidence[stage].semantic_score ?? evidence[stage].rank_score ?? 0)).filter(Number.isFinite)
-  const confidence = scoreValues.length ? Math.max(0, Math.min(1, scoreValues.reduce((sum, value) => sum + value, 0) / scoreValues.length)) : null
+  const confidenceValues = presentStages
+    .map((stage) => Number(evidence[stage]?.extraction_confidence ?? evidence[stage]?.rerank_score ?? evidence[stage]?.semantic_score ?? 0))
+    .filter(Number.isFinite)
+  const confidence = confidenceValues.length
+    ? Math.max(0, Math.min(1, confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length))
+    : null
+  const notFoundStages = expectedStages.filter((stage) => (
+    !evidence[stage] && parameterStageStatus(documents, stage, parameter.code) === 'NOT_FOUND'
+  ))
 
-  let status = 'MISSING_EVIDENCE'
+  let status = notFoundStages.length ? 'NOT_FOUND' : 'MISSING_EVIDENCE'
   let description = `Недостаточно доказательств для параметра «${parameter.parameter}».`
-  if (expectedStages.length && comparisonEvidence.length < expectedStages.length) {
+  if (notFoundStages.length) {
+    const missing = notFoundStages.map(stageLabel).join(', ')
+    description = `Подтверждённое значение параметра «${parameter.parameter}» не найдено в источниках: ${missing}.`
+  } else if (expectedStages.length && comparisonEvidence.length < expectedStages.length) {
     const missing = expectedStages.filter((stage) => !evidence[stage]).map(stageLabel).join(', ')
     description = `Не найдены сопоставимые фрагменты: ${missing}.`
   } else if (pair?.relation === 'MATCH') {
@@ -291,7 +328,7 @@ function buildFindingOccurrence(parameter, pair, candidates, comparisonStages) {
     if (pair?.relation === 'UNCERTAIN') {
       status = 'CLARIFICATION_REQUIRED'
       description = `Источники ${stageLabel(pair.leftStage)} и ${stageLabel(pair.rightStage)} найдены, но сопоставимое значение извлечено неоднозначно.`
-    } else if (intersectionSize(comparisonEvidence.map((item) => comparableValues(item.text))) > 0) {
+    } else if (intersectionSize(comparisonEvidence.map((item) => comparableValues(item))) > 0) {
       status = 'NEGATIVE_VERIFIED'
       description = 'В найденных фрагментах ПД, РД и ИД совпадают извлечённые числовые или кодовые значения.'
     } else {
@@ -307,8 +344,8 @@ function buildFindingOccurrence(parameter, pair, candidates, comparisonStages) {
     evidence,
     status,
     confidence,
-    expectedValue: pair?.left ? truncate(pair.left.text, 900) : snippets.PD,
-    actualValue: pair?.right ? truncate(pair.right.text, 900) : JSON.stringify({ RD: snippets.RD, ID: snippets.ID }, null, 0),
+    expectedValue: pair?.left ? extractedDisplayValue(pair.left) : extractedDisplayValue(evidence.PD) || snippets.PD,
+    actualValue: pair?.right ? extractedDisplayValue(pair.right) : extractedDisplayValue(evidence.RD) || extractedDisplayValue(evidence.ID) || JSON.stringify({ RD: snippets.RD, ID: snippets.ID }, null, 0),
     comparison: serializeComparison(pair, parameter),
     description,
   }
@@ -340,7 +377,7 @@ function compareParameter(parameter, documents) {
   return {
     parameter,
     candidates,
-    occurrences: selectedOccurrences.map((pair) => buildFindingOccurrence(parameter, pair, candidates, comparisonStages)),
+    occurrences: selectedOccurrences.map((pair) => buildFindingOccurrence(parameter, pair, candidates, comparisonStages, documents)),
   }
 }
 
@@ -438,7 +475,7 @@ async function persistComparison({ client, objectId, comparisons, documents, par
          ON CONFLICT (id) DO UPDATE SET expected_value = EXCLUDED.expected_value, actual_value = EXCLUDED.actual_value,
            completeness_status = EXCLUDED.completeness_status, finding_status = EXCLUDED.finding_status,
            review_priority = EXCLUDED.review_priority, evidence_group_id = EXCLUDED.evidence_group_id, updated_at = NOW()`,
-        [checkId, parameter.id, objectId, expectedValue, actualValue, null, status === 'MISSING_EVIDENCE' ? 'MISSING' : 'PRESENT', status, parameter.priority || null, findingId],
+         [checkId, parameter.id, objectId, expectedValue, actualValue, null, ['MISSING_EVIDENCE', 'NOT_FOUND'].includes(status) ? 'MISSING' : 'PRESENT', status, parameter.priority || null, findingId],
       )
       await client.query(
         `INSERT INTO findings (finding_id, object_id, matrix_code, section, parameter_name, unit, status, review_priority, discovery_method, expected_value, actual_value, trigger_text, description, normative, confidence, pd_source, rd_source, comparison)
@@ -455,7 +492,7 @@ async function persistComparison({ client, objectId, comparisons, documents, par
     const section = bySection.get(parameter.section) || { parameters: 0, findings: 0, missing: 0 }
     section.parameters += 1
     section.findings += occurrences.length
-    section.missing += occurrences.filter(({ status }) => status === 'MISSING_EVIDENCE').length
+    section.missing += occurrences.filter(({ status }) => ['MISSING_EVIDENCE', 'NOT_FOUND'].includes(status)).length
     bySection.set(parameter.section, section)
   }
 
@@ -508,8 +545,10 @@ export async function runObjectAnalysis({ objectId, processId, req }) {
           code: parameter.code,
           parameter: parameter.parameter,
           section: parameter.section,
+          unit: parameter.unit,
           source: stageSource(parameter, file.stage),
           trigger: parameter.trigger_text,
+          stage: file.stage,
         })),
       })
       documents.push({ file, result })

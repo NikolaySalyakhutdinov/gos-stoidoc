@@ -148,6 +148,21 @@ git lfs ls-files
 Get-Item ".\services\python-ai\models\construction-minilm-132\model.safetensors" | Select-Object FullName, Length
 ```
 
+## AI-пайплайн документов
+
+После загрузки документов AI-сервис выполняет `Parser v2 → layout-aware Chunker
+v3 → MiniLM TOP-20 → source-aware reranker → Parameter Extractor`, а Node.js
+сравнивает подтверждённые значения между ПД, РД и ИД. Блоки с числовыми
+размерами чертежей сохраняются с `bbox`, но не смешиваются с текстом и не
+принимаются за значение параметра. При отсутствии подтверждённого значения
+создаётся статус `NOT_FOUND`.
+
+Проверка Python-пайплайна в Docker:
+
+```powershell
+npm run ai:test
+```
+
 Ожидаемый размер `model.safetensors` — примерно **449 МБ**.
 
 ## Полезные команды Git LFS

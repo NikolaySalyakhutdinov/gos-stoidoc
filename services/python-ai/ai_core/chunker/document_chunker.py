@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Iterable
 @dataclass(frozen=True)
 class _Token:
@@ -60,7 +61,14 @@ class DocumentChunker:
         self.chunk_size = chunk_size
         self.overlap = overlap
 
-    def chunk(self, parsed_document: dict[str, Any]) -> dict[str, Any]:
+    def chunk(
+        self,
+        parsed_document: dict[str, Any],
+        *,
+        source: str | None = None,
+        stage: str | None = None,
+        section: str | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(parsed_document, dict):
             raise TypeError("parsed_document must be a dict")
 
@@ -80,7 +88,11 @@ class DocumentChunker:
 
         return {
             "type": "chunks",
+            "schema_version": "chunker-v3",
             "source_type": document_type,
+            "source": source or parsed_document.get("source"),
+            "stage": stage or parsed_document.get("stage"),
+            "section": section or parsed_document.get("section"),
             "settings": {
                 "max_words": self.max_words,
                 "overlap_words": self.overlap_words,
@@ -114,46 +126,108 @@ class DocumentChunker:
             page_number = page.get("page")
             blocks = page.get("blocks") or []
 
-            tokens = self._pdf_tokens(blocks)
-
-            # Fallback: if no OCR word blocks exist, use page text.
-            if not tokens:
-                page_text = self._normalize_space(str(page.get("text", "")))
-                if not page_text:
+            # Keep native/OCR blocks independent. Joining every block on a page
+            # makes dimension strings from drawings look like a sentence from a
+            # nearby paragraph, which was the source of the "number soup" bug.
+            local_index = 0
+            for block_index, block in enumerate(blocks):
+                text = self._normalize_space(str(block.get("text", "")))
+                if not text:
                     continue
-                tokens = [_Token(text=word) for word in page_text.split()]
 
-            # Read columns independently. Flattening a two-column page by
-            # y-coordinate mixes unrelated lines from the left and right
-            # columns and produces exactly the "number soup" seen in the UI.
-            token_columns = self._pdf_token_columns(tokens)
-            multiple_columns = len(token_columns) > 1
-
-            for column_index, column_tokens in enumerate(token_columns, start=1):
-                page_chunks = self._window_tokens(column_tokens)
-                for local_index, token_group in enumerate(page_chunks, start=1):
-                    text = self._tokens_to_text(token_group)
-                    if not text:
-                        continue
-
-                    chunk_id = f"pdf-p{int(page_number or 0):04d}-c{local_index:04d}"
-                    if multiple_columns:
-                        chunk_id = f"pdf-p{int(page_number or 0):04d}-col{column_index:02d}-c{local_index:04d}"
-                    result.append(
-                        {
-                            "id": chunk_id,
-                            "source_type": "pdf",
-                            "page": page_number,
-                            "column": column_index if multiple_columns else None,
-                            "text": text,
-                            "word_count": len(token_group),
-                            "bbox": self._merge_bboxes(token_group),
-                            "avg_confidence": self._avg_confidence(token_group),
-                            "source_word_indices": self._source_index_range(token_group),
-                        }
+                source_kind = str(block.get("source_kind") or "text")
+                content_kind = self._classify_pdf_block(text, source_kind)
+                bbox = self._valid_bbox(block.get("bbox"))
+                confidence_raw = block.get("confidence")
+                confidence = float(confidence_raw) if isinstance(confidence_raw, (int, float)) else None
+                words = [
+                    _Token(
+                        text=word,
+                        bbox=bbox,
+                        confidence=confidence,
+                        source_index=block_index,
                     )
+                    for word in text.split()
+                ]
+                for part_index, token_group in enumerate(self._window_tokens(words), start=1):
+                    chunk_text = self._tokens_to_text(token_group)
+                    if not chunk_text:
+                        continue
+                    local_index += 1
+                    result.append({
+                        "id": f"pdf-p{int(page_number or 0):04d}-b{block_index:04d}-c{part_index:04d}",
+                        "source_type": "pdf",
+                        "source": parsed_document.get("source"),
+                        "stage": parsed_document.get("stage"),
+                        "section": parsed_document.get("section"),
+                        "page": page_number,
+                        "column": None,
+                        "block_index": block_index,
+                        "block_type": block.get("block_type", 0),
+                        "source_kind": source_kind,
+                        "content_kind": content_kind,
+                        "searchable": content_kind == "text",
+                        "layout_role": "pdf_block",
+                        "text": chunk_text,
+                        "word_count": len(token_group),
+                        "bbox": self._merge_bboxes(token_group),
+                        "avg_confidence": self._avg_confidence(token_group),
+                        "source_word_indices": self._source_index_range(token_group),
+                    })
+
+            # Fallback for parsers that only expose page.text. This is still a
+            # single text chunk and never gets combined with drawing blocks.
+            if not local_index:
+                page_text = self._normalize_space(str(page.get("text", "")))
+                for part_index, words in enumerate(self._window_plain_text(page_text), start=1):
+                    if not words:
+                        continue
+                    result.append({
+                        "id": f"pdf-p{int(page_number or 0):04d}-fallback-c{part_index:04d}",
+                        "source_type": "pdf",
+                        "source": parsed_document.get("source"),
+                        "stage": parsed_document.get("stage"),
+                        "section": parsed_document.get("section"),
+                        "page": page_number,
+                        "column": None,
+                        "block_index": None,
+                        "block_type": 0,
+                        "source_kind": "text",
+                        "content_kind": "text",
+                        "searchable": True,
+                        "layout_role": "page_fallback",
+                        "text": " ".join(words),
+                        "word_count": len(words),
+                        "bbox": None,
+                        "avg_confidence": None,
+                        "source_word_indices": None,
+                    })
 
         return result
+
+    @staticmethod
+    def _classify_pdf_block(text: str, source_kind: str) -> str:
+        if source_kind == "image":
+            return "image"
+
+        words = re.findall(r"[A-Za-zА-Яа-яЁё]+", text)
+        numeric_tokens = re.findall(
+            r"(?<!\w)-?\d+(?:[.,]\d+)?(?:\s*[xх×]\s*-?\d+(?:[.,]\d+)?)?",
+            text,
+        )
+        has_dimension_marker = bool(re.search(r"(?:\d\s*[xх×]\s*\d|\d+\s*(?:мм|см|м|м²|м³|mm|cm|m2|m3)\b)", text, re.IGNORECASE))
+        has_parameter_anchor = bool(re.search(
+            r"(?:объем|площад|класс|бетон|мощност|высот|этаж|количеств|расход|нагруз|давлен)",
+            text,
+            re.IGNORECASE,
+        ))
+        # A block containing mostly numbers/dimensions is kept for traceability
+        # but excluded from the searchable text corpus.
+        if numeric_tokens and not has_parameter_anchor and (
+            len(words) <= 3 or (has_dimension_marker and len(numeric_tokens) >= len(words))
+        ):
+            return "drawing_dimension"
+        return "text"
 
     def _pdf_tokens(self, blocks: list[dict[str, Any]]) -> list[_Token]:
         tokens: list[_Token] = []
@@ -318,7 +392,14 @@ class DocumentChunker:
                     {
                         "id": f"docx-c{sequence:04d}",
                         "source_type": "docx",
+                        "source": parsed_document.get("source"),
+                        "stage": parsed_document.get("stage"),
+                        "section": parsed_document.get("section"),
                         "source_kind": block.get("type", "paragraph"),
+                        "content_kind": "text",
+                        "searchable": True,
+                        "page": block.get("page"),
+                        "bbox": block.get("bbox"),
                         "block_index": block_index,
                         "part": part_index,
                         "text": " ".join(words),
@@ -346,7 +427,14 @@ class DocumentChunker:
                         {
                             "id": f"docx-c{sequence:04d}",
                             "source_type": "docx",
+                            "source": parsed_document.get("source"),
+                            "stage": parsed_document.get("stage"),
+                            "section": parsed_document.get("section"),
                             "source_kind": "table_row",
+                            "content_kind": "table_row",
+                            "searchable": True,
+                            "page": None,
+                            "bbox": None,
                             "table_index": table_index,
                             "row_index": row_index,
                             "part": part_index,
@@ -380,6 +468,13 @@ class DocumentChunker:
                     {
                         "id": f"xml-c{sequence:04d}",
                         "source_type": "xml",
+                        "source": parsed_document.get("source"),
+                        "stage": parsed_document.get("stage"),
+                        "section": parsed_document.get("section"),
+                        "content_kind": "text",
+                        "searchable": True,
+                        "page": None,
+                        "bbox": None,
                         "xml_path": path,
                         "part": part_index,
                         "text": " ".join(words),

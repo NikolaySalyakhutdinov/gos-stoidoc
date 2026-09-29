@@ -10,7 +10,7 @@ const TABS = [
   { key: 'candidates', label: 'Кандидаты', statuses: ['CANDIDATE', 'PENDING'] },
   { key: 'confirmed', label: 'Подтверждённые нарушения', statuses: ['CONFIRMED_VIOLATION'] },
   { key: 'negative', label: 'Отрицательные (проверено)', statuses: ['NEGATIVE_VERIFIED'] },
-  { key: 'other', label: 'Без данных / уточнение', statuses: ['MISSING_EVIDENCE', 'NOT_APPLICABLE', 'NOT_COMPARABLE', 'CLARIFICATION_REQUIRED'] },
+  { key: 'other', label: 'Без данных / уточнение', statuses: ['MISSING_EVIDENCE', 'NOT_FOUND', 'NOT_APPLICABLE', 'NOT_COMPARABLE', 'CLARIFICATION_REQUIRED'] },
   { key: 'suspicion', label: 'Гипотезы (вне матрицы)', statuses: ['SUSPICION'] },
 ]
 
