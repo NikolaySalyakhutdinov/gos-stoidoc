@@ -81,6 +81,11 @@ AI_CHUNKS = Counter("stroynadzor_ai_chunks_total", "Searchable chunks produced b
 
 MODEL_PATH = Path(os.getenv("AI_MODEL_PATH", str(BASE_DIR / "models" / "construction-minilm-132")))
 MAX_REQUEST_BYTES = int(os.getenv("AI_MAX_REQUEST_BYTES", str(210 * 1024 * 1024)))
+LISTEN_PORT = int(os.getenv("PORT", os.getenv("AI_PORT", "8000")))
+# When set, /process (not /health or /metrics) requires this exact value in
+# X-Internal-Token. Used when the service is reachable from the public
+# internet (e.g. Cloud Run) instead of only from a private Docker network.
+INTERNAL_TOKEN = os.getenv("AI_INTERNAL_TOKEN", "")
 OCR_DPI = int(os.getenv("AI_OCR_DPI", "250"))
 SEARCH_TOP_K = int(os.getenv("AI_SEARCH_TOP_K", "20"))
 SEARCH_RERANK_TOP_K = int(os.getenv("AI_SEARCH_RERANK_TOP_K", "12"))
@@ -406,6 +411,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": "Not found"})
             return
 
+        if INTERNAL_TOKEN and self.headers.get("X-Internal-Token", "") != INTERNAL_TOKEN:
+            self.send_json(401, {"status": "FAILED", "code": "UNAUTHORIZED", "error": "Неверный или отсутствующий X-Internal-Token"})
+            return
+
         started = time.monotonic()
         stage = "unknown"
         try:
@@ -442,6 +451,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("0.0.0.0", 8000), Handler)
-    logging.info("Python AI listening on :8000, model=%s", MODEL_PATH)
+    server = ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), Handler)
+    logging.info("Python AI listening on :%s, model=%s", LISTEN_PORT, MODEL_PATH)
     server.serve_forever()

@@ -46,10 +46,16 @@ export async function processDocumentWithAi({
 
   logger.info('AI request started', { stage: file.stage, file: fileName, timeout_ms: AI_TIMEOUT_MS })
 
+  const headers = {}
+  if (process.env.AI_INTERNAL_TOKEN) {
+    headers['X-Internal-Token'] = process.env.AI_INTERNAL_TOKEN
+  }
+
   try {
     const response = await fetch(url, {
       method: 'POST',
       body: form,
+      headers,
       dispatcher: aiDispatcher,
       signal: AbortSignal.timeout(AI_TIMEOUT_MS),
     })
