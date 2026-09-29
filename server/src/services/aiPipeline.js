@@ -36,6 +36,51 @@ function comparableValues(text) {
   return new Set([...tokens(text)].filter((value) => /\d/.test(value)))
 }
 
+function anchorTokens(text) {
+  return [...tokens(text)].filter((value) => !/\d/.test(value) && value.length >= 4)
+}
+
+function anchorTokenMatches(left, right) {
+  if (left === right) return true
+  const suffixes = ['иями', 'ами', 'ями', 'ого', 'ему', 'ому', 'ыми', 'ими', 'ей', 'ий', 'ый', 'ой', 'ая', 'яя', 'ов', 'ев', 'ам', 'ям', 'ах', 'ях', 'ом', 'ем', 'ы', 'и', 'а', 'я', 'у', 'ю', 'е']
+  const stem = (value) => {
+    const suffix = suffixes.find((item) => value.length - item.length >= 4 && value.endsWith(item))
+    return suffix ? value.slice(0, -suffix.length) : value
+  }
+  const leftStem = stem(left.replaceAll('ё', 'е'))
+  const rightStem = stem(right.replaceAll('ё', 'е'))
+  return leftStem === rightStem || (leftStem.length >= 5 && rightStem.startsWith(leftStem.slice(0, 5)))
+}
+
+const GENERIC_PARAMETER_TERMS = new Set([
+  'общий', 'общие', 'общего', 'общая', 'основной', 'основные', 'данные', 'сведения',
+  'работа', 'работы', 'рабочий', 'рабочие', 'конструкция', 'конструкции', 'объект',
+  'объекта', 'здание', 'здания', 'устройство', 'система', 'системы', 'материал',
+  'материалы', 'схема', 'схемы', 'план', 'планы', 'чертеж', 'чертежи', 'ведомость',
+  'ведомости', 'раздел', 'лист', 'таблица', 'значение', 'показатель', 'параметр',
+])
+
+function anchorRelevance(candidate, parameter, stage) {
+  const primary = anchorTokens(parameter.parameter)
+  const source = anchorTokens(stageSource(parameter, stage))
+  const textTerms = anchorTokens(candidate.text)
+  if (!primary.length || !textTerms.length) return null
+
+  const distinctivePrimary = primary.filter((term) => !GENERIC_PARAMETER_TERMS.has(term))
+  const primaryMatches = primary.filter((term) => textTerms.some((value) => anchorTokenMatches(term, value))).length
+  const distinctiveMatches = distinctivePrimary.filter((term) => textTerms.some((value) => anchorTokenMatches(term, value))).length
+  const requiredDistinctiveMatches = distinctivePrimary.length >= 2 ? 2 : 1
+  if (distinctivePrimary.length && distinctiveMatches < requiredDistinctiveMatches) return null
+  if (!distinctivePrimary.length && primaryMatches < 2) return null
+
+  const allTerms = [...new Set([...primary, ...source])]
+  const matchedTerms = allTerms.filter((term) => textTerms.some((value) => anchorTokenMatches(term, value))).length
+  return {
+    score: allTerms.length ? matchedTerms / allTerms.length : 0,
+    matchCount: matchedTerms,
+  }
+}
+
 function intersectionSize(sets) {
   if (!sets.length || sets.some((set) => set.size === 0)) return 0
   const [first, ...rest] = sets
@@ -161,18 +206,20 @@ function selectComparisonPair(candidates, stages) {
   return pairs[0] || null
 }
 
-function evidenceCandidates(documents, stage, code) {
+function evidenceCandidates(documents, stage, parameter) {
   const candidates = documents
     .filter((document) => document.file.stage === stage)
-    .flatMap((document) => (document.result.results_by_parameter?.[code] || []).map((item) => ({ ...item, file: document.file })))
+    .flatMap((document) => (document.result.results_by_parameter?.[parameter.code] || []).map((item) => ({ ...item, file: document.file })))
     .sort((left, right) => Number(right.rank_score ?? right.semantic_score ?? 0) - Number(left.rank_score ?? left.semantic_score ?? 0))
   const unique = []
   const keys = new Set()
   for (const candidate of candidates) {
+    const relevance = anchorRelevance(candidate, parameter, stage)
+    if (!relevance) continue
     const key = [candidate.file.id, candidate.page || '', candidateValueKey(candidate) || String(candidate.text || '').slice(0, 180)].join(':')
     if (keys.has(key)) continue
     keys.add(key)
-    unique.push(candidate)
+    unique.push({ ...candidate, anchor_score: relevance.score, anchor_match_count: relevance.matchCount })
     if (unique.length >= MAX_EVIDENCE_CANDIDATES) break
   }
   return unique
@@ -268,7 +315,7 @@ function buildFindingOccurrence(parameter, pair, candidates, comparisonStages) {
 }
 
 function compareParameter(parameter, documents) {
-  const candidates = Object.fromEntries(STAGES.map((stage) => [stage, evidenceCandidates(documents, stage, parameter.code)]))
+  const candidates = Object.fromEntries(STAGES.map((stage) => [stage, evidenceCandidates(documents, stage, parameter)]))
   const requiredStages = STAGES.filter((stage) => String(stageSource(parameter, stage) || '').trim())
   const presentStages = STAGES.filter((stage) => candidates[stage].length)
   const comparisonStages = requiredStages.length ? requiredStages : presentStages

@@ -155,7 +155,7 @@ def parse_queries(raw: str) -> list[dict]:
         queries.append({
             "code": code,
             "text": ". ".join(part for part in (parameter, section, source, trigger) if part),
-            "anchor": ". ".join(part for part in (parameter, source) if part),
+                "anchor": parameter,
         })
     return queries
 

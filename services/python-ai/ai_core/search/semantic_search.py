@@ -252,7 +252,7 @@ class SemanticSearch:
         required_anchor_terms = (
             int(min_anchor_terms)
             if min_anchor_terms is not None
-            else 2 if len(anchor_terms) >= 8 else 1
+            else 2 if len(anchor_terms) >= 3 else 1
         )
         if required_anchor_terms < 0:
             raise ValueError("min_anchor_terms must be >= 0")
