@@ -5,23 +5,28 @@
 ## 1. Что нужно установить
 
 - Docker Desktop с включённым WSL 2;
-- Git — только если проект нужно скачать из GitHub.
+- Git и Git LFS — если проект нужно скачать из GitHub.
 
 Для первого запуска рекомендуется выделить Docker Desktop не менее 8 ГБ оперативной памяти: AI-сервис загружает модель MiniLM.
 
 ## 2. Запуск через Docker
 
-Откройте PowerShell и перейдите в каталог проекта:
-
-```powershell
-cd C:\Users\olgas\OneDrive\Desktop\Коля\stroynadzor-ai-main
-```
-
 Если проект ещё не скачан:
 
 ```powershell
-git clone https://github.com/NikolaySalyakhutdinov/gos-stoidoc.git stroynadzor-ai-main
-cd stroynadzor-ai-main
+git lfs install
+git clone https://github.com/NikolaySalyakhutdinov/gos-stoidoc.git gos-stoidoc
+cd gos-stoidoc
+git lfs pull
+```
+
+Если Git LFS ещё не установлен, установите его с сайта <https://git-lfs.com/>, затем повторите `git lfs install`.
+
+Если репозиторий уже был клонирован без LFS-файлов, выполните из каталога `gos-stoidoc`:
+
+```powershell
+git lfs install
+git lfs pull
 ```
 
 Создайте локальный файл настроек:
@@ -278,4 +283,3 @@ docker compose --profile messaging up -d
 ```powershell
 docker compose --profile messaging --profile monitoring down -v
 ```
-
