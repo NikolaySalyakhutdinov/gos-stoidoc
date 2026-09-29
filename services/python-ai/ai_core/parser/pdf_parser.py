@@ -1,143 +1,111 @@
-import fitz
 import cv2
+import fitz
 import numpy as np
 
-from .image_processor import ImageProcessor
+from .image_processor import preprocess
+from .layout_analyzer import analyze
 from .ocr_engine import OCREngine
+from .quality_checker import check_text
+from .text_cleaner import clean
+from .text_extractor import extract_blocks
 
 
 class PDFParser:
 
     def __init__(
         self,
-        dpi: int = 300,
+        path: str | None = None,
+        debug: bool = False,
+        dpi: int = 360,
         language: str = "rus+eng",
         tesseract_path: str | None = None
     ):
-
+        self.path = path
+        self.debug = debug
         self.dpi = dpi
-
-        self.image_processor = ImageProcessor()
-
         self.ocr = OCREngine(
             language=language,
             tesseract_path=tesseract_path
         )
 
-    def _page_to_image(self, page):
-        """
-        PDF page -> OpenCV image
-        """
-
-        zoom = self.dpi / 72
-
-        matrix = fitz.Matrix(
-            zoom,
-            zoom
-        )
-
-        pixmap = page.get_pixmap(
-            matrix=matrix,
+    def render(self, page):
+        pix = page.get_pixmap(
+            matrix=fitz.Matrix(
+                self.dpi / 72,
+                self.dpi / 72
+            ),
             alpha=False
         )
 
-        image = np.frombuffer(
-            pixmap.samples,
+        img = np.frombuffer(
+            pix.samples,
             dtype=np.uint8
         )
 
-        image = image.reshape(
-            pixmap.height,
-            pixmap.width,
-            pixmap.n
+        img = img.reshape(
+            pix.height,
+            pix.width,
+            pix.n
         )
 
-        if pixmap.n == 4:
-
-            image = cv2.cvtColor(
-                image,
+        if pix.n == 4:
+            img = cv2.cvtColor(
+                img,
                 cv2.COLOR_RGBA2BGR
             )
-
-        else:
-
-            image = cv2.cvtColor(
-                image,
+        elif pix.n == 3:
+            img = cv2.cvtColor(
+                img,
                 cv2.COLOR_RGB2BGR
             )
 
-        return image
+        return img
 
-    def parse(self, file_path: str):
+    def parse(self, file_path: str | None = None):
+        path = file_path or self.path
+        if not path:
+            raise ValueError("Не указан путь к PDF-файлу")
 
-        document = fitz.open(file_path)
+        doc = fitz.open(path)
 
-        pages = []
+        result = {
+            "type": "pdf",
+            "document": path,
+            "pages": []
+        }
 
         try:
+            for number, page in enumerate(doc, 1):
+                blocks = extract_blocks(page)
 
-            for page_index, page in enumerate(document):
-
-                page_number = page_index + 1
-
-                print(
-                    f"[PDF] Обработка страницы "
-                    f"{page_number}/{len(document)}"
-                )
-
-                # -----------------------------
-                # PDF -> IMAGE
-                # -----------------------------
-
-                image = self._page_to_image(page)
-
-                original_height, original_width = (
-                    image.shape[:2]
-                )
-
-                # -----------------------------
-                # OPENCV
-                # -----------------------------
-
-                processed = (
-                    self.image_processor.preprocess(
-                        image
-                    )
-                )
-
-                # -----------------------------
-                # OCR
-                # -----------------------------
-
-                blocks = self.ocr.recognize(
-                    processed
-                )
-
-                # Собираем весь текст страницы
-
-                page_text = " ".join(
+                text = "\n".join(
                     block["text"]
                     for block in blocks
                 )
 
-                pages.append({
+                valid, quality, reason = check_text(text)
+                method = "text"
 
-                    "page": page_number,
+                if not valid:
+                    image = self.render(page)
+                    image = preprocess(image)
+                    blocks = self.ocr.recognize_blocks(image)
+                    text = "\n".join(block["text"] for block in blocks)
+                    method = "ocr"
+                    if not text.strip():
+                        text = self.ocr.recognize(image)
+                        blocks = [{"bbox": None, "text": text}]
+                    valid, quality, reason = check_text(text)
 
-                    "width": original_width,
-
-                    "height": original_height,
-
-                    "text": page_text,
-
-                    "blocks": blocks
+                result["pages"].append({
+                    "page": number,
+                    "method": method,
+                    "quality": quality,
+                    "reason": reason,
+                    "blocks": analyze(blocks),
+                    "text": clean(text)
                 })
-
         finally:
+            doc.close()
 
-            document.close()
-
-        return {
-            "type": "pdf",
-            "pages": pages
-        }
+        return result

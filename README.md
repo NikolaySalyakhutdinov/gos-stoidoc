@@ -1,60 +1,171 @@
-# Стройнадзор ИИ
+# gos-stoidoc
 
-Локальное React-приложение для работы с объектами строительства и Node.js API,
-готовое к подключению Python 3.11-сервиса анализа документов.
+Инструкция по клонированию приватного репозитория `gos-stoidoc` на другом компьютере вместе с файлами, которые хранятся через Git LFS.
 
-## Быстрый запуск в Docker
+Репозиторий приватный. Инструкция предназначена для пользователей, которым уже предоставлен доступ к репозиторию на GitHub.
 
-```powershell
-Copy-Item .env.example .env
-docker compose up --build
-```
+## Что понадобится
 
-Адреса:
+- аккаунт GitHub с доступом к репозиторию;
+- Git;
+- Git LFS;
+- доступ к интернету.
 
-- сайт: http://localhost:8080;
-- Node API: http://localhost:4000/api/health;
-- Python placeholder: http://localhost:8000/health;
-- PostgreSQL: `localhost:5432`.
+## Установка и проверка Git и Git LFS
 
-Если команда запускается в PowerShell, переменные не задаются записью вида
-`JWT_SECRET=...`; для Docker используйте файл `.env` или команду
-`$env:JWT_SECRET = '...'`.
+Установите Git для своей операционной системы с официального сайта:
 
-## Что реализовано
+<https://git-scm.com/downloads>
 
-- PostgreSQL-схема создаётся автоматически: операционные таблицы объектов,
-  пользователей, файлов и аудита пустые; справочник матрицы автоматически
-  заполняется исходными 132 параметрами.
-- Пароли хешируются `bcryptjs`, авторизация работает через JWT.
-- Регистрация разрешена только для адресов с доменом `.ru`; сервер возвращает
-  понятную ошибку HTTP 400, которая показывается в форме React.
-- Документы загружаются multipart-запросом и сохраняются в PostgreSQL `BYTEA`;
-  рядом сохраняются размер, MIME-тип и SHA-256.
-- Удаление объекта доступно в карточке: перед удалением пишется аудит, затем
-  PostgreSQL каскадно удаляет документы, процессы, findings и связанные записи.
-- Все объекты, findings и события аудита на фронтенде приходят из API.
-- Аудит фиксирует регистрацию, создание объекта, загрузку/удаление файлов,
-  решения инспектора, смену статусов и удаление объекта.
-- После записи файла Node отправляет его в `PYTHON_AI_URL`. Контейнер
-  `python-ai` на Python 3.11 пока только принимает этот контракт и отвечает 202.
-- В compose добавлен профиль `future-ai` с RabbitMQ для будущего worker-контурa.
-- Кнопка «Заполнить демо-доступ» доступна только для локальной разработки;
-  демо-пользователь создаётся лениво при первом входе и не добавляется при старте.
-- Добавление и удаление параметров матрицы разрешено только роли `ADMIN`;
-  сервер проверяет это через `403`, независимо от интерфейса.
-- Удаление объекта требует выбрать причину; для «Другое» нужен комментарий.
+Git LFS обычно устанавливается вместе с Git для Windows. Если команда Git LFS не работает, установите его отдельно:
 
-## Локальный запуск без Docker
+<https://git-lfs.com/>
 
-Требуется доступный PostgreSQL:
+Откройте PowerShell или терминал и проверьте установку:
 
 ```powershell
-Copy-Item .env.example .env
-npm install
-npm --prefix server install
-npm --prefix server run migrate
-npm run dev:full
+git --version
+git lfs version
 ```
 
-Для production обязательно задайте собственные `JWT_SECRET` и пароль PostgreSQL.
+Обе команды должны вывести версии установленных программ.
+
+Один раз включите Git LFS для текущего пользователя:
+
+```powershell
+git lfs install
+```
+
+Ожидаемый результат — сообщение о том, что Git LFS настроен.
+
+## Клонирование репозитория
+
+1. Убедитесь, что на GitHub вашему аккаунту предоставлен доступ к приватному репозиторию `gos-stoidoc`.
+
+2. Перейдите в папку, в которую хотите скачать проект, и выполните:
+
+```powershell
+git clone https://github.com/NikolaySalyakhutdinov/gos-stoidoc.git
+```
+
+3. Перейдите в каталог проекта:
+
+```powershell
+cd gos-stoidoc
+```
+
+Если GitHub запросит авторизацию, войдите под аккаунтом, которому предоставлен доступ к репозиторию. Обычный пароль GitHub нельзя использовать вместо пароля Git в командной строке. Используйте авторизацию через браузер/Git Credential Manager или Personal Access Token.
+
+## Скачивание файлов Git LFS
+
+После клонирования скачайте настоящие версии файлов, хранящихся в Git LFS:
+
+```powershell
+git lfs pull
+```
+
+В проекте через Git LFS хранится, в частности, модель:
+
+```text
+services/python-ai/models/construction-minilm-132/model.safetensors
+```
+
+## Проверка Git LFS
+
+Проверьте, какие файлы отслеживаются через Git LFS:
+
+```powershell
+git lfs ls-files
+```
+
+В выводе должна присутствовать модель, например:
+
+```text
+26d7feac2a * services/python-ai/models/construction-minilm-132/model.safetensors
+```
+
+Звёздочка `*` означает, что файл загружен в рабочую копию.
+
+## Проверка размера модели
+
+В PowerShell выполните:
+
+```powershell
+Get-Item ".\services\python-ai\models\construction-minilm-132\model.safetensors" |
+    Select-Object FullName, Length
+```
+
+Настоящая модель должна занимать примерно **449 МБ** — около 449 000 000 байт.
+
+Если размер файла составляет примерно 130–150 байт, скачался только Git LFS pointer — небольшой текстовый файл-ссылку вместо самой модели. В этом случае восстановите файл по инструкции ниже.
+
+## Если вместо модели скачался Git LFS pointer
+
+Находясь в каталоге проекта `gos-stoidoc`, выполните команды последовательно:
+
+```powershell
+git lfs fetch origin main
+git lfs checkout
+git lfs pull origin main
+```
+
+Что делают эти команды:
+
+1. `git lfs fetch origin main` скачивает LFS-объекты с удалённого репозитория.
+2. `git lfs checkout` заменяет pointer настоящими файлами из локального LFS-хранилища.
+3. `git lfs pull origin main` синхронизирует LFS-файлы с веткой `main`.
+
+После этого снова проверьте размер модели:
+
+```powershell
+Get-Item ".\services\python-ai\models\construction-minilm-132\model.safetensors" |
+    Select-Object FullName, Length
+```
+
+Если файл по-прежнему имеет размер около 130–150 байт, проверьте доступ к приватному репозиторию и повторите авторизацию GitHub.
+
+## Обычное обновление проекта
+
+Чтобы получить последние изменения из ветки `main`, выполните в каталоге проекта:
+
+```powershell
+git pull origin main
+git lfs pull
+```
+
+Первая команда обновляет обычные файлы Git, вторая — файлы, хранящиеся через Git LFS.
+
+## Быстрый старт
+
+Если Git и Git LFS уже установлены, а доступ к репозиторию настроен, достаточно выполнить:
+
+```powershell
+git lfs install
+git clone https://github.com/NikolaySalyakhutdinov/gos-stoidoc.git
+cd gos-stoidoc
+git lfs pull
+git lfs ls-files
+Get-Item ".\services\python-ai\models\construction-minilm-132\model.safetensors" | Select-Object FullName, Length
+```
+
+Ожидаемый размер `model.safetensors` — примерно **449 МБ**.
+
+## Полезные команды Git LFS
+
+Проверить состояние LFS:
+
+```powershell
+git lfs status
+```
+
+Показать все LFS-файлы в текущей версии проекта:
+
+```powershell
+git lfs ls-files
+```
+
+Принудительно скачать LFS-файлы для ветки `main`:
+
+```powershell
+git lfs pull origin main
+```

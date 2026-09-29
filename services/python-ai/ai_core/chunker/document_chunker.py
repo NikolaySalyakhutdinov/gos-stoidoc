@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Iterable
-
-
 @dataclass(frozen=True)
 class _Token:
     text: str
@@ -33,6 +31,8 @@ class DocumentChunker:
         min_words: int = 8,
         min_ocr_confidence: float = 0.0,
         line_tolerance: float = 0.012,
+        chunk_size: int = 700,
+        overlap: int = 120,
     ) -> None:
         if max_words <= 0:
             raise ValueError("max_words must be > 0")
@@ -47,11 +47,18 @@ class DocumentChunker:
         if line_tolerance <= 0:
             raise ValueError("line_tolerance must be > 0")
 
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be > 0")
+        if overlap < 0 or overlap >= chunk_size:
+            raise ValueError("overlap must be in [0, chunk_size)")
+
         self.max_words = max_words
         self.overlap_words = overlap_words
         self.min_words = min_words
         self.min_ocr_confidence = min_ocr_confidence
         self.line_tolerance = line_tolerance
+        self.chunk_size = chunk_size
+        self.overlap = overlap
 
     def chunk(self, parsed_document: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(parsed_document, dict):
@@ -79,10 +86,22 @@ class DocumentChunker:
                 "overlap_words": self.overlap_words,
                 "min_words": self.min_words,
                 "min_ocr_confidence": self.min_ocr_confidence,
+                "chunk_size": self.chunk_size,
+                "overlap": self.overlap,
             },
             "chunk_count": len(chunks),
             "chunks": chunks,
         }
+
+    def create_chunks(self, document: dict[str, Any]) -> list[dict[str, Any]]:
+        """
+        Compatibility entry point for callers that use the older public name.
+
+        PDF chunks are created by the layout-aware, word-based implementation;
+        this deliberately avoids joining all page blocks and cutting text at
+        arbitrary character offsets.
+        """
+        return self._chunk_pdf(document)
 
     # ------------------------------------------------------------------
     # PDF
@@ -104,29 +123,35 @@ class DocumentChunker:
                     continue
                 tokens = [_Token(text=word) for word in page_text.split()]
 
-            # Sort OCR words by visual reading order. This is more stable than
-            # trusting the raw OCR array when a page contains several regions.
-            tokens = self._sort_pdf_tokens(tokens)
+            # Read columns independently. Flattening a two-column page by
+            # y-coordinate mixes unrelated lines from the left and right
+            # columns and produces exactly the "number soup" seen in the UI.
+            token_columns = self._pdf_token_columns(tokens)
+            multiple_columns = len(token_columns) > 1
 
-            page_chunks = self._window_tokens(tokens)
+            for column_index, column_tokens in enumerate(token_columns, start=1):
+                page_chunks = self._window_tokens(column_tokens)
+                for local_index, token_group in enumerate(page_chunks, start=1):
+                    text = self._tokens_to_text(token_group)
+                    if not text:
+                        continue
 
-            for local_index, token_group in enumerate(page_chunks, start=1):
-                text = self._tokens_to_text(token_group)
-                if not text:
-                    continue
-
-                result.append(
-                    {
-                        "id": f"pdf-p{int(page_number or 0):04d}-c{local_index:04d}",
-                        "source_type": "pdf",
-                        "page": page_number,
-                        "text": text,
-                        "word_count": len(token_group),
-                        "bbox": self._merge_bboxes(token_group),
-                        "avg_confidence": self._avg_confidence(token_group),
-                        "source_word_indices": self._source_index_range(token_group),
-                    }
-                )
+                    chunk_id = f"pdf-p{int(page_number or 0):04d}-c{local_index:04d}"
+                    if multiple_columns:
+                        chunk_id = f"pdf-p{int(page_number or 0):04d}-col{column_index:02d}-c{local_index:04d}"
+                    result.append(
+                        {
+                            "id": chunk_id,
+                            "source_type": "pdf",
+                            "page": page_number,
+                            "column": column_index if multiple_columns else None,
+                            "text": text,
+                            "word_count": len(token_group),
+                            "bbox": self._merge_bboxes(token_group),
+                            "avg_confidence": self._avg_confidence(token_group),
+                            "source_word_indices": self._source_index_range(token_group),
+                        }
+                    )
 
         return result
 
@@ -163,57 +188,112 @@ class DocumentChunker:
         return tokens
 
     def _sort_pdf_tokens(self, tokens: list[_Token]) -> list[_Token]:
+        return [token for column in self._pdf_token_columns(tokens) for token in column]
+
+    def _pdf_token_columns(self, tokens: list[_Token]) -> list[list[_Token]]:
         with_bbox = [token for token in tokens if token.bbox is not None]
         without_bbox = [token for token in tokens if token.bbox is None]
 
         if not with_bbox:
-            return tokens
+            return [tokens]
 
-        # Group by approximate text line using normalized vertical centers.
-        ordered = sorted(
-            with_bbox,
-            key=lambda token: (
-                self._bbox_y_center(token.bbox),
-                token.bbox[0],
-            ),
-        )
-
-        lines: list[list[_Token]] = []
-        line_centers: list[float] = []
-
-        for token in ordered:
-            center = self._bbox_y_center(token.bbox)
-
-            best_line = None
-            best_distance = None
-
-            for line_index, line_center in enumerate(line_centers):
-                distance = abs(center - line_center)
-                if distance <= self.line_tolerance and (
-                    best_distance is None or distance < best_distance
-                ):
-                    best_line = line_index
-                    best_distance = distance
-
-            if best_line is None:
-                lines.append([token])
-                line_centers.append(center)
+        groups: list[list[_Token]] = []
+        group_indexes: dict[int, int] = {}
+        for token in with_bbox:
+            source_index = token.source_index
+            if source_index is None:
+                groups.append([token])
+                continue
+            group_index = group_indexes.get(source_index)
+            if group_index is None:
+                group_indexes[source_index] = len(groups)
+                groups.append([token])
             else:
-                lines[best_line].append(token)
-                line_centers[best_line] = sum(
-                    self._bbox_y_center(item.bbox) for item in lines[best_line]
-                ) / len(lines[best_line])
+                groups[group_index].append(token)
 
-        line_pairs = sorted(zip(line_centers, lines), key=lambda item: item[0])
+        group_data = []
+        for index, group in enumerate(groups):
+            bbox = self._merge_bboxes(group)
+            if bbox is None:
+                continue
+            group_data.append((index, group, bbox))
 
-        result: list[_Token] = []
-        for _, line in line_pairs:
-            result.extend(sorted(line, key=lambda token: token.bbox[0]))
+        if not group_data:
+            return [tokens]
 
-        # Keep non-geometric tokens after the ordered OCR tokens rather than
-        # discarding them.
+        page_left = min(item[2][0] for item in group_data)
+        page_right = max(item[2][2] for item in group_data)
+        page_width = max(page_right - page_left, 1.0)
+        full_width_limit = page_width * 0.72
+        narrow_groups = [item for item in group_data if item[2][2] - item[2][0] < full_width_limit]
+
+        # A single-column page should stay one sequence. Only split when
+        # several text groups form clearly separated horizontal bands.
+        centers = sorted((self._bbox_x_center(item[2]) for item in narrow_groups))
+        if len(centers) < 4:
+            return [self._sort_pdf_groups(group_data, without_bbox)]
+
+        split_gap = max(80.0, page_width * 0.16)
+        clusters: list[list[float]] = [[centers[0]]]
+        for center in centers[1:]:
+            if center - clusters[-1][-1] > split_gap:
+                clusters.append([center])
+            else:
+                clusters[-1].append(center)
+
+        # Do not turn diagrams or uneven one-column pages into many columns.
+        if len(clusters) <= 1 or len(clusters) > 3:
+            return [self._sort_pdf_groups(group_data, without_bbox)]
+
+        column_centers = [sum(cluster) / len(cluster) for cluster in clusters]
+        columns: list[list[tuple[int, list[_Token], tuple[float, float, float, float]]]] = [
+            [] for _ in column_centers
+        ]
+        full_width_groups = []
+        for item in group_data:
+            _, _, bbox = item
+            if bbox[2] - bbox[0] >= full_width_limit:
+                full_width_groups.append(item)
+                continue
+            center = self._bbox_x_center(bbox)
+            column_index = min(
+                range(len(column_centers)),
+                key=lambda index: abs(column_centers[index] - center),
+            )
+            columns[column_index].append(item)
+
+        columns = [column for column in columns if column]
+        if len(columns) <= 1:
+            return [self._sort_pdf_groups(group_data, without_bbox)]
+
+        first_body_y = min(item[2][1] for column in columns for item in column)
+        last_body_y = max(item[2][3] for column in columns for item in column)
+        for item in sorted(full_width_groups, key=lambda value: value[2][1]):
+            if item[2][3] <= first_body_y:
+                columns[0].insert(0, item)
+            elif item[2][1] >= last_body_y:
+                columns[-1].append(item)
+            else:
+                columns[0].append(item)
+
+        result = [self._sort_pdf_groups(column, []) for column in columns]
+        if without_bbox:
+            result[-1].extend(without_bbox)
+        return result
+
+    @staticmethod
+    def _sort_pdf_groups(group_data, without_bbox):
+        ordered = sorted(
+            group_data,
+            key=lambda item: (item[2][1], item[2][0], item[0]),
+        )
+        result = [token for _, group, _ in ordered for token in group]
         result.extend(without_bbox)
         return result
+
+    @staticmethod
+    def _bbox_x_center(bbox: tuple[float, float, float, float]) -> float:
+        return (bbox[0] + bbox[2]) / 2.0
 
     # ------------------------------------------------------------------
     # DOCX

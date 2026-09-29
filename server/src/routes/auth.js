@@ -2,7 +2,7 @@ import { Router } from 'express'
 import bcrypt from 'bcryptjs'
 import { randomUUID } from 'node:crypto'
 import { query, withTransaction } from '../db.js'
-import { signToken } from '../utils/jwt.js'
+import { signRefreshToken, signToken, verifyRefreshToken } from '../utils/jwt.js'
 import { toPublicUser } from '../utils/users.js'
 import { requireAuth } from '../middleware/auth.js'
 import { asyncHandler, recordAudit } from '../utils/http.js'
@@ -12,6 +12,13 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const ROLES = ['INSPECTOR', 'ADMIN', 'ML_ENGINEER']
 const DEMO_EMAIL = 'inspector@stroynadzor-ai.ru'
 const DEMO_PASSWORD = 'demo1234'
+
+function issueTokens(row) {
+  return {
+    token: signToken(row.id, row.role),
+    refreshToken: signRefreshToken(row.id, row.role),
+  }
+}
 
 router.post('/register', asyncHandler(async (req, res) => {
   const { name, email, password, role, org } = req.body || {}
@@ -47,7 +54,7 @@ router.post('/register', asyncHandler(async (req, res) => {
       await recordAudit(client, { req, userId: user.id, action: 'USER_REGISTERED', details: { email: user.email, role: effectiveRole } })
       return inserted.rows[0]
     })
-    return res.status(201).json({ token: signToken(row.id, row.role), user: toPublicUser(row) })
+    return res.status(201).json({ ...issueTokens(row), user: toPublicUser(row) })
   } catch (error) {
     if (error.code === '23505') return res.status(409).json({ error: 'Пользователь с таким email уже зарегистрирован' })
     throw error
@@ -78,7 +85,28 @@ router.post('/login', asyncHandler(async (req, res) => {
     return res.status(401).json({ error: 'Неверный email или пароль' })
   }
 
-  return res.json({ token: signToken(row.id, row.role), user: toPublicUser(row) })
+  return res.json({ ...issueTokens(row), user: toPublicUser(row) })
+}))
+
+router.post('/refresh', asyncHandler(async (req, res) => {
+  const { refreshToken } = req.body || {}
+  if (!refreshToken || typeof refreshToken !== 'string') {
+    return res.status(401).json({ error: 'Refresh-токен отсутствует' })
+  }
+
+  try {
+    const payload = verifyRefreshToken(refreshToken)
+    const result = await query('SELECT * FROM users WHERE id = $1', [payload.sub])
+    const row = result.rows[0]
+    if (!row) return res.status(401).json({ error: 'Сессия недействительна' })
+
+    return res.json({
+      ...issueTokens(row),
+      user: toPublicUser(row),
+    })
+  } catch {
+    return res.status(401).json({ error: 'Refresh-токен недействителен или истёк' })
+  }
 }))
 
 router.get('/me', requireAuth, (req, res) => {

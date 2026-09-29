@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useVerification } from '../store/VerificationStore'
 import StatusBadge from '../components/StatusBadge'
 import Icon from '../components/Icon'
 import { FINDING_STATUS, REASON_CODES, DISCOVERY_METHODS } from '../data/constants'
 import { formatDateTime } from '../utils/helpers'
+import { apiFetchBlob } from '../api/client'
 
 export default function Verify() {
   const { id, findingId } = useParams()
@@ -25,6 +26,34 @@ export default function Verify() {
   const f = findings[idx]
   const prev = findings[idx - 1]
   const next = findings[idx + 1]
+  const comparison = useMemo(() => getComparisonPair(f || {}), [f])
+  const [previewUrls, setPreviewUrls] = useState({})
+  const [previewErrors, setPreviewErrors] = useState({})
+  const [viewer, setViewer] = useState(null)
+
+  useEffect(() => {
+    let active = true
+    const objectUrls = []
+    const sources = [comparison.leftSource, comparison.rightSource]
+      .filter((source) => source?.file_id && isPdfSource(source))
+
+    Promise.all(sources.map(async (source) => {
+      try {
+        const blob = await apiFetchBlob(`/api/objects/${encodeURIComponent(id)}/files/${encodeURIComponent(source.file_id)}/content`)
+        if (!active) return
+        const url = URL.createObjectURL(blob)
+        objectUrls.push(url)
+        setPreviewUrls((current) => ({ ...current, [source.file_id]: url }))
+      } catch (error) {
+        if (active) setPreviewErrors((current) => ({ ...current, [source.file_id]: error.message }))
+      }
+    }))
+
+    return () => {
+      active = false
+      objectUrls.forEach((url) => URL.revokeObjectURL(url))
+    }
+  }, [id, comparison.leftSource, comparison.rightSource])
 
   const isDecided = f && ['CONFIRMED_VIOLATION', 'NEGATIVE_VERIFIED', 'NOT_APPLICABLE'].includes(f.status) && f.verification
 
@@ -37,6 +66,8 @@ export default function Verify() {
   if (!obj || !f) {
     return <div className="empty-state">Загрузка записи… <Link className="link-btn" to={`/objects/${id}/protocol`}>Вернуться к протоколу</Link></div>
   }
+
+  const stageLabel = (stage) => ({ PD: 'ПД', RD: 'РД', ID: 'ИД' }[stage] || stage || 'Документ')
 
   function confirmViolation() {
     decide(id, f.finding_id, { status: 'CONFIRMED_VIOLATION', comment: comment || 'Нарушение подтверждено инспектором.' })
@@ -88,18 +119,32 @@ export default function Verify() {
       )}
 
       <div className="evidence-grid">
-        <EvidenceColumn kind="pd" title="Проектная документация (ПД) — база сравнения" source={f.pd_source} value={f.expected_value} />
-        <EvidenceColumn kind="rd" title="Рабочая / исполнительная документация — зона расхождения" source={f.rd_source} value={f.actual_value} />
+        <EvidenceColumn
+          kind="pd"
+          title={`${stageLabel(comparison.leftStage)} — первый источник сравнения`}
+          source={comparison.leftSource}
+          previewUrl={previewUrls[comparison.leftSource?.file_id]}
+          previewError={previewErrors[comparison.leftSource?.file_id]}
+          onOpen={() => setViewer({ source: comparison.leftSource, url: previewUrls[comparison.leftSource?.file_id] })}
+        />
+        <EvidenceColumn
+          kind="rd"
+          title={`${stageLabel(comparison.rightStage)} — второй источник сравнения`}
+          source={comparison.rightSource}
+          previewUrl={previewUrls[comparison.rightSource?.file_id]}
+          previewError={previewErrors[comparison.rightSource?.file_id]}
+          onOpen={() => setViewer({ source: comparison.rightSource, url: previewUrls[comparison.rightSource?.file_id] })}
+        />
       </div>
 
       <div className="card card-pad" style={{ marginTop: 18 }}>
         <div className="grid-3">
           <div>
-            <div className="hint">ОЖИДАЕМОЕ ЗНАЧЕНИЕ</div>
+            <div className="hint">{stageLabel(comparison.leftStage)} — ЗНАЧЕНИЕ</div>
             <div className="value-box" style={{ marginTop: 6, borderColor: 'var(--blue)' }}>{f.expected_value}</div>
           </div>
           <div>
-            <div className="hint">ФАКТИЧЕСКОЕ ЗНАЧЕНИЕ</div>
+            <div className="hint">{stageLabel(comparison.rightStage)} — ЗНАЧЕНИЕ</div>
             <div className="value-box" style={{ marginTop: 6, borderColor: 'var(--red)' }}>{f.actual_value}</div>
           </div>
           <div>
@@ -206,31 +251,113 @@ export default function Verify() {
           Следующий <Icon name="chevronRight" size={14} />
         </button>
       </div>
+
+      {viewer?.url && (
+        <div className="document-viewer-backdrop" role="presentation" onClick={() => setViewer(null)}>
+          <div className="document-viewer-modal" role="dialog" aria-modal="true" aria-label={`Просмотр ${viewer.source?.file_name || 'документа'}`} onClick={(event) => event.stopPropagation()}>
+            <div className="document-viewer-head">
+              <div>
+                <div className="document-viewer-title">{viewer.source?.file_name || 'Документ'}</div>
+                <div className="document-viewer-subtitle">
+                  {stageLabel(viewer.source?.stage)} · {getValidPage(viewer.source) ? `страница ${getValidPage(viewer.source)}` : 'страница не определена'}
+                </div>
+              </div>
+              <button className="btn btn-sm" type="button" onClick={() => setViewer(null)}>Закрыть</button>
+            </div>
+            <iframe
+              className="document-viewer-frame"
+              src={`${viewer.url}${pdfPageFragment(getValidPage(viewer.source))}`}
+              title={`Просмотр ${viewer.source?.file_name || 'документа'}`}
+            />
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
-function EvidenceColumn({ kind, title, source, value }) {
-  const label = kind === 'pd' ? 'ПД' : 'РД / ИД'
+function EvidenceColumn({ kind, title, source, previewUrl, previewError, onOpen }) {
+  const stage = source?.stage || '—'
+  const page = getValidPage(source)
+  const section = source?.section
+  const hasFile = Boolean(source?.file_id)
   return (
     <div className={`evidence-col ${kind}`}>
       <div className="evidence-col-head">
         <span>{title}</span>
       </div>
       <div className="evidence-visual">
-        <div className="frame" style={{ width: '58%', height: '55%' }}>
-          <span className="frame-label">{label} · {source?.sheet || '—'}</span>
-        </div>
+        {previewUrl ? (
+          <div className="evidence-preview" role="button" tabIndex={0} onClick={onOpen} onKeyDown={(event) => event.key === 'Enter' && onOpen?.()}>
+            <iframe
+              className="evidence-preview-frame"
+              src={`${previewUrl}${pdfPageFragment(page)}`}
+              title={`Предпросмотр ${source?.file_name || 'документа'}`}
+              tabIndex={-1}
+            />
+            <span className="evidence-preview-overlay">Открыть просмотр</span>
+          </div>
+        ) : (
+          <div className="frame" style={{ width: '58%', height: '55%' }}>
+            <span className="frame-label">{stage} · {page || '—'}</span>
+            <span className="evidence-preview-status">
+              {previewError ? 'Не удалось открыть скан' : hasFile && isPdfSource(source) ? 'Загрузка скана…' : 'Скан недоступен'}
+            </span>
+          </div>
+        )}
       </div>
       <div className="evidence-meta">
         <div className="evidence-meta-row"><span className="muted">Файл</span><span className="mono">{source?.file_name || '—'}</span></div>
-        <div className="evidence-meta-row"><span className="muted">Раздел / марка</span><span>{source?.discipline || '—'}</span></div>
-        <div className="evidence-meta-row"><span className="muted">Редакция</span><span>{source?.revision || '—'}</span></div>
-        <div className="evidence-meta-row"><span className="muted">Статус утверждения</span><span>{source?.approval_status || '—'}</span></div>
-        <div className="evidence-meta-row"><span className="muted">Лист / страница</span><span>{source?.sheet || '—'}</span></div>
+        <div className="evidence-meta-row"><span className="muted">Размер</span><span>{formatFileSize(source?.file_size)}</span></div>
+        <div className="evidence-meta-row"><span className="muted">Раздел</span><span>{section || '—'}</span></div>
+        <div className="evidence-meta-row"><span className="muted">Код документа</span><span>{source?.document_code || '—'}</span></div>
+        <div className="evidence-meta-row"><span className="muted">Лист / страница</span><span>{page || '—'}</span></div>
       </div>
     </div>
   )
+}
+
+function formatFileSize(bytes) {
+  const value = Number(bytes)
+  if (!Number.isFinite(value) || value <= 0) return '—'
+  if (value < 1024) return `${value} Б`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} КБ`
+  return `${(value / (1024 * 1024)).toFixed(1)} МБ`
+}
+
+function getValidPage(source) {
+  const page = Number(source?.page)
+  const pageCount = Number(source?.page_count)
+  if (!Number.isInteger(page) || page < 1) return null
+  if (Number.isInteger(pageCount) && pageCount > 0 && page > pageCount) return null
+  return page
+}
+
+function pdfPageFragment(page) {
+  return page ? `#page=${page}` : ''
+}
+
+function isPdfSource(source) {
+  return source?.mime_type === 'application/pdf' || /\.pdf$/i.test(source?.file_name || '')
+}
+
+function getComparisonPair(finding) {
+  if (finding.comparison?.left_source || finding.comparison?.right_source) {
+    return {
+      leftStage: finding.comparison.left_stage || finding.comparison.left_source?.stage || 'PD',
+      rightStage: finding.comparison.right_stage || finding.comparison.right_source?.stage || 'RD',
+      leftSource: finding.comparison.left_source,
+      rightSource: finding.comparison.right_source,
+    }
+  }
+
+  const rightSource = finding.rd_source?.RD || finding.rd_source?.ID || finding.rd_source || null
+  return {
+    leftStage: finding.pd_source?.stage || 'PD',
+    rightStage: rightSource?.stage || 'RD',
+    leftSource: finding.pd_source,
+    rightSource,
+  }
 }
 
 function DecisionSummary({ f, onUndo }) {

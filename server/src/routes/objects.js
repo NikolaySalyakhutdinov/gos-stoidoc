@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { query, withTransaction } from '../db.js'
 import { requireAuth } from '../middleware/auth.js'
 import { asyncHandler, recordAudit } from '../utils/http.js'
+import { normalizeFilename } from '../utils/filename.js'
 import { runObjectAnalysis } from '../services/aiPipeline.js'
 import { serializeObject, serializeFinding, findingsSummary, objectColor } from '../utils/serialize.js'
 
@@ -28,9 +29,32 @@ const upload = multer({
   limits: { fileSize: MAX_FILE_SIZE, files: 10 },
 })
 
+async function getFindingContext(objectId) {
+  const [filesResult, fragmentsResult] = await Promise.all([
+    query('SELECT id, stage, name, mime_type, size, sha256, page_count FROM files WHERE object_id = $1', [objectId]),
+    query('SELECT file_id, page, text, bbox FROM evidence_fragments WHERE object_id = $1 ORDER BY created_at ASC', [objectId]),
+  ])
+  const filesById = new Map(filesResult.rows.map((file) => [file.id, file]))
+  const fragmentsByFile = new Map()
+  for (const fragment of fragmentsResult.rows) {
+    const list = fragmentsByFile.get(fragment.file_id) || []
+    list.push(fragment)
+    fragmentsByFile.set(fragment.file_id, list)
+  }
+  return { filesById, fragmentsByFile }
+}
+
 async function getFindings(objectId) {
-  const result = await query('SELECT * FROM findings WHERE object_id = $1 ORDER BY created_at ASC', [objectId])
-  return result.rows.map(serializeFinding)
+  const [result, context] = await Promise.all([
+    query('SELECT * FROM findings WHERE object_id = $1 ORDER BY created_at ASC', [objectId]),
+    getFindingContext(objectId),
+  ])
+  return result.rows.map((row) => serializeFinding(row, context.filesById, context.fragmentsByFile))
+}
+
+async function serializeUpdatedFinding(row, objectId) {
+  const context = await getFindingContext(objectId)
+  return serializeFinding(row, context.filesById, context.fragmentsByFile)
 }
 
 async function getObject(objectId) {
@@ -155,6 +179,22 @@ router.get('/:id/findings', asyncHandler(async (req, res) => {
   res.json({ findings: await getFindings(req.params.id) })
 }))
 
+router.get('/:id/files/:fileId/content', asyncHandler(async (req, res) => {
+  const result = await query(
+    'SELECT name, mime_type, size, content FROM files WHERE id = $1 AND object_id = $2',
+    [req.params.fileId, req.params.id],
+  )
+  const file = result.rows[0]
+  if (!file) return res.status(404).json({ error: 'Файл не найден' })
+
+  const fileName = normalizeFilename(file.name) || 'document'
+  const encodedFileName = encodeURIComponent(fileName).replace(/'/g, '%27')
+  res.setHeader('Content-Type', file.mime_type || 'application/octet-stream')
+  res.setHeader('Content-Length', String(file.size))
+  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodedFileName}`)
+  res.send(file.content)
+}))
+
 router.post('/:id/findings/:findingId/decide', asyncHandler(async (req, res) => {
   const { status, reason_code, comment } = req.body || {}
   if (!DECISION_STATUSES.includes(status)) return res.status(400).json({ error: 'Некорректный статус решения' })
@@ -169,7 +209,7 @@ router.post('/:id/findings/:findingId/decide', asyncHandler(async (req, res) => 
     await recordAudit(client, { req, objectId: req.params.id, findingId: finding.finding_id, action: 'FINDING_DECIDED', details: { status, reasonCode: reason_code || null, comment: comment || '' } })
     return next.rows[0]
   })
-  res.json({ finding: serializeFinding(updated) })
+  res.json({ finding: await serializeUpdatedFinding(updated, req.params.id) })
 }))
 
 router.post('/:id/findings/:findingId/undo', asyncHandler(async (req, res) => {
@@ -182,13 +222,13 @@ router.post('/:id/findings/:findingId/undo', asyncHandler(async (req, res) => {
     await recordAudit(client, { req, objectId: req.params.id, findingId: finding.finding_id, action: 'FINDING_UNDO', details: { status: resetStatus } })
     return next.rows[0]
   })
-  res.json({ finding: serializeFinding(updated) })
+  res.json({ finding: await serializeUpdatedFinding(updated, req.params.id) })
 }))
 
 router.get('/:id/uploads', asyncHandler(async (req, res) => {
   const result = await query('SELECT id, stage, name, size, uploaded_at FROM files WHERE object_id = $1 ORDER BY uploaded_at ASC', [req.params.id])
   const uploads = { PD: [], RD: [], ID: [] }
-  for (const row of result.rows) uploads[row.stage]?.push({ id: row.id, name: row.name, size: Number(row.size), uploaded_at: row.uploaded_at })
+  for (const row of result.rows) uploads[row.stage]?.push({ id: row.id, name: normalizeFilename(row.name), size: Number(row.size), uploaded_at: row.uploaded_at })
   res.json({ uploads })
 }))
 
@@ -203,12 +243,13 @@ router.post('/:id/uploads/:stage', upload.array('files', 10), asyncHandler(async
 
   const allowedExtensions = new Set(['.pdf', '.docx', '.xml'])
   const normalizedFiles = req.files.map((file) => {
-    const dot = file.originalname.lastIndexOf('.')
-    const extension = dot >= 0 ? file.originalname.slice(dot).toLowerCase() : ''
-    if (!allowedExtensions.has(extension)) throw Object.assign(new Error(`Файл «${file.originalname}» имеет неподдерживаемый формат`), { status: 400 })
+    const name = normalizeFilename(file.originalname)
+    const dot = name.lastIndexOf('.')
+    const extension = dot >= 0 ? name.slice(dot).toLowerCase() : ''
+    if (!allowedExtensions.has(extension)) throw Object.assign(new Error(`Файл «${name}» имеет неподдерживаемый формат`), { status: 400 })
     return {
       id: randomUUID(),
-      name: file.originalname,
+      name,
       mimeType: file.mimetype || 'application/octet-stream',
       size: file.size,
       sha256: createHash('sha256').update(file.buffer).digest('hex'),
@@ -250,10 +291,25 @@ router.post('/:id/uploads/:stage', upload.array('files', 10), asyncHandler(async
 }))
 
 router.delete('/:id/uploads/:stage/:fileId', asyncHandler(async (req, res) => {
+  const stage = req.params.stage
+  if (!DOCUMENT_STAGES.includes(stage)) return res.status(400).json({ error: 'Некорректная стадия документа' })
+  const column = stage === 'PD' ? 'pd_status' : stage === 'RD' ? 'rd_status' : 'id_status'
+
   const result = await withTransaction(async (client) => {
-    const deleted = await client.query('DELETE FROM files WHERE id = $1 AND object_id = $2 AND stage = $3 RETURNING id, name, stage', [req.params.fileId, req.params.id, req.params.stage])
+    const deleted = await client.query('DELETE FROM files WHERE id = $1 AND object_id = $2 AND stage = $3 RETURNING id, name, stage', [req.params.fileId, req.params.id, stage])
     if (!deleted.rows[0]) return null
     await recordAudit(client, { req, objectId: req.params.id, action: 'DOCUMENT_DELETED', details: deleted.rows[0] })
+
+    const remaining = await client.query(
+      'SELECT EXISTS (SELECT 1 FROM files WHERE object_id = $1 AND stage = $2) AS has_files',
+      [req.params.id, stage],
+    )
+    const nextStatus = remaining.rows[0].has_files ? 'UPLOADED' : 'MISSING'
+    await client.query(
+      `UPDATE objects SET ${column} = $1, updated_at = NOW() WHERE id = $2`,
+      [nextStatus, req.params.id],
+    )
+
     return deleted.rows[0]
   })
   if (!result) return res.status(404).json({ error: 'Файл не найден' })

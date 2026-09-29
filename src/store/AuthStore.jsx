@@ -1,23 +1,58 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react'
-import { apiFetch, getToken, setToken } from '../api/client'
+import {
+  apiFetch,
+  clearSession,
+  getRefreshToken,
+  getToken,
+  refreshSession,
+  setSession,
+} from '../api/client'
 
 const Ctx = createContext(null)
+const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const token = getToken()
-    if (!token) {
+    const handleExpired = () => {
+      setUser(null)
       setLoading(false)
-      return
     }
+
+    window.addEventListener('auth:expired', handleExpired)
+
+    const token = getToken()
+    const refreshToken = getRefreshToken()
+    if (!token && !refreshToken) {
+      setLoading(false)
+      return () => window.removeEventListener('auth:expired', handleExpired)
+    }
+
     apiFetch('/api/auth/me')
       .then((data) => setUser(data.user))
-      .catch(() => setToken(null))
+      .catch(() => {
+        clearSession()
+        setUser(null)
+      })
       .finally(() => setLoading(false))
+
+    return () => window.removeEventListener('auth:expired', handleExpired)
   }, [])
+
+  useEffect(() => {
+    if (!user || !getRefreshToken()) return undefined
+
+    const timer = window.setInterval(() => {
+      refreshSession().catch(() => {
+        clearSession()
+        setUser(null)
+      })
+    }, REFRESH_INTERVAL_MS)
+
+    return () => window.clearInterval(timer)
+  }, [user])
 
   const api = useMemo(
     () => ({
@@ -28,7 +63,7 @@ export function AuthProvider({ children }) {
       async signIn(email, password) {
         try {
           const data = await apiFetch('/api/auth/login', { method: 'POST', body: { email, password } })
-          setToken(data.token)
+          setSession(data)
           setUser(data.user)
           return { ok: true }
         } catch (err) {
@@ -39,7 +74,7 @@ export function AuthProvider({ children }) {
       async signUp({ name, email, password, role, org }) {
         try {
           const data = await apiFetch('/api/auth/register', { method: 'POST', body: { name, email, password, role, org } })
-          setToken(data.token)
+          setSession(data)
           setUser(data.user)
           return { ok: true }
         } catch (err) {
@@ -48,7 +83,7 @@ export function AuthProvider({ children }) {
       },
 
       signOut() {
-        setToken(null)
+        clearSession()
         setUser(null)
       },
 

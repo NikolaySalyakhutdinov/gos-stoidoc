@@ -167,11 +167,14 @@ export function VerificationProvider({ children }) {
           const current = s[objectId] || EMPTY_UPLOADS
           return { ...s, [objectId]: { ...current, [stage]: current[stage].filter((f) => f.id !== fileId) } }
         })
+        await refreshObject(objectId)
       },
 
       getEffectiveDocStatus(objectId, stage) {
         const obj = objects.find((o) => o.id === objectId)
         if (!obj) return 'MISSING'
+        const stageUploads = uploadsByObject[objectId]?.[stage]
+        if (stageUploads) return stageUploads.length > 0 ? 'UPLOADED' : 'MISSING'
         return { PD: obj.pd_status, RD: obj.rd_status, ID: obj.id_status }[stage]
       },
 

@@ -177,6 +177,10 @@ class SemanticSearch:
         min_score: float | None = None,
         hybrid: bool = False,
         lexical_weight: float = 0.15,
+        anchor_text: str | None = None,
+        anchor_weight: float = 0.0,
+        min_anchor_score: float | None = None,
+        min_anchor_terms: int | None = None,
         deduplicate: bool = True,
         duplicate_threshold: float = 0.88,
     ) -> list[dict[str, Any]]:
@@ -196,6 +200,14 @@ class SemanticSearch:
             small lexical score for exact/domain terms.
         lexical_weight:
             Weight of lexical score in hybrid ranking, from 0 to 1.
+        anchor_text:
+            Parameter/source words that must be present in a result.
+        anchor_weight:
+            Weight of the anchor score in hybrid ranking, from 0 to 1.
+        min_anchor_score:
+            Optional minimum fraction of anchor terms matched by a chunk.
+        min_anchor_terms:
+            Optional minimum number of matched anchor terms.
         deduplicate:
             Suppress near-duplicate overlapping chunks from the result list.
         duplicate_threshold:
@@ -208,6 +220,12 @@ class SemanticSearch:
             raise ValueError("top_k must be > 0")
         if not 0.0 <= lexical_weight <= 1.0:
             raise ValueError("lexical_weight must be in [0, 1]")
+        if not 0.0 <= anchor_weight <= 1.0:
+            raise ValueError("anchor_weight must be in [0, 1]")
+        if lexical_weight + anchor_weight > 1.0:
+            raise ValueError("lexical_weight + anchor_weight must be <= 1")
+        if min_anchor_score is not None and not 0.0 <= min_anchor_score <= 1.0:
+            raise ValueError("min_anchor_score must be in [0, 1]")
         if not 0.0 <= duplicate_threshold <= 1.0:
             raise ValueError("duplicate_threshold must be in [0, 1]")
         if not self.chunks:
@@ -228,18 +246,44 @@ class SemanticSearch:
         semantic_scores = self.embeddings @ query_embedding
 
         lexical_scores = np.zeros(len(self.chunks), dtype=np.float32)
+        anchor_scores = np.zeros(len(self.chunks), dtype=np.float32)
+        anchor_match_counts = np.zeros(len(self.chunks), dtype=np.int32)
+        anchor_terms = self._normalized_terms(anchor_text or "")
+        required_anchor_terms = (
+            int(min_anchor_terms)
+            if min_anchor_terms is not None
+            else 2 if len(anchor_terms) >= 8 else 1
+        )
+        if required_anchor_terms < 0:
+            raise ValueError("min_anchor_terms must be >= 0")
+
+        if anchor_terms:
+            anchor_values = [
+                self._lexical_match_stats(anchor_terms, chunk["text"])
+                for chunk in self.chunks
+            ]
+            anchor_match_counts = np.asarray(
+                [value[0] for value in anchor_values],
+                dtype=np.int32,
+            )
+            anchor_scores = np.asarray(
+                [value[1] for value in anchor_values],
+                dtype=np.float32,
+            )
+
         if hybrid:
             lexical_scores = np.asarray(
                 [self._lexical_score(query, chunk["text"]) for chunk in self.chunks],
                 dtype=np.float32,
             )
-
             # Cosine similarity is [-1, 1], lexical score is [0, 1].
             # Convert semantic similarity to [0, 1] only for the hybrid rank.
             semantic_01 = np.clip((semantic_scores + 1.0) / 2.0, 0.0, 1.0)
+            semantic_weight = 1.0 - lexical_weight - anchor_weight
             rank_scores = (
-                (1.0 - lexical_weight) * semantic_01
+                semantic_weight * semantic_01
                 + lexical_weight * lexical_scores
+                + anchor_weight * anchor_scores
             )
         else:
             rank_scores = semantic_scores
@@ -253,6 +297,11 @@ class SemanticSearch:
             semantic_score = float(semantic_scores[index])
             if min_score is not None and semantic_score < min_score:
                 continue
+            if anchor_terms:
+                if anchor_match_counts[index] < required_anchor_terms:
+                    continue
+                if min_anchor_score is not None and anchor_scores[index] < min_anchor_score:
+                    continue
 
             chunk = self.chunks[index]
 
@@ -270,6 +319,8 @@ class SemanticSearch:
             result = dict(chunk)
             result["semantic_score"] = round(semantic_score, 6)
             result["lexical_score"] = round(float(lexical_scores[index]), 6)
+            result["anchor_score"] = round(float(anchor_scores[index]), 6)
+            result["anchor_match_count"] = int(anchor_match_counts[index])
             result["rank_score"] = round(float(rank_scores[index]), 6)
             results.append(result)
 
@@ -435,23 +486,52 @@ class SemanticSearch:
 
     def _lexical_score(self, query: str, text: str) -> float:
         query_tokens = self._normalized_terms(query)
-        text_tokens = self._normalized_terms(text)
-        if not query_tokens or not text_tokens:
+        if not query_tokens:
             return 0.0
 
-        matched = 0
-        for query_token in query_tokens:
-            if any(self._term_matches(query_token, token) for token in text_tokens):
-                matched += 1
+        return self._lexical_match_stats(query_tokens, text)[1]
 
-        return matched / len(query_tokens)
+    def _lexical_match_stats(self, query_tokens: list[str], text: str) -> tuple[int, float]:
+        text_tokens = self._normalized_terms(text)
+        if not query_tokens or not text_tokens:
+            return 0, 0.0
+
+        matched = sum(
+            1
+            for query_token in query_tokens
+            if any(self._term_matches(query_token, token) for token in text_tokens)
+        )
+        return matched, matched / len(query_tokens)
 
     def _normalized_terms(self, text: str) -> list[str]:
         terms = [match.group(0).casefold() for match in self._WORD_RE.finditer(text)]
-        return [term for term in terms if len(term) >= 2]
+        stop_words = {
+            "а", "без", "в", "во", "для", "до", "за", "и", "из", "к", "как",
+            "на", "над", "не", "ни", "о", "об", "от", "по", "под", "при", "с",
+            "со", "у", "через", "это", "этот", "эта", "эти", "раздел", "источник",
+        }
+        return [term for term in terms if len(term) >= 2 and term not in stop_words]
 
     @staticmethod
     def _term_matches(left: str, right: str) -> bool:
+        left = left.replace("ё", "е")
+        right = right.replace("ё", "е")
+        if left == right:
+            return True
+
+        suffixes = (
+            "иями", "ами", "ями", "ого", "ему", "ому", "ыми", "ими", "ее", "ое",
+            "ей", "ий", "ый", "ой", "ая", "яя", "ов", "ев", "ам", "ям", "ах", "ях",
+            "ом", "ем", "ы", "и", "а", "я", "у", "ю", "е",
+        )
+        for suffix in suffixes:
+            if len(left) - len(suffix) >= 4 and left.endswith(suffix):
+                left = left[:-len(suffix)]
+                break
+        for suffix in suffixes:
+            if len(right) - len(suffix) >= 4 and right.endswith(suffix):
+                right = right[:-len(suffix)]
+                break
         if left == right:
             return True
 

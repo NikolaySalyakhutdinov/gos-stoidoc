@@ -15,80 +15,58 @@ class OCREngine:
             pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
     def recognize(self, image):
-        """
-        Распознаёт слова на изображении.
+        return pytesseract.image_to_string(
+            image,
+            lang=self.language,
+            config="--oem 3 --psm 3"
+        )
 
-        Возвращает:
-        - текст слова
-        - confidence
-        - bbox в пикселях
-        - bbox в координатах от 0 до 1
-        """
-
+    def recognize_blocks(self, image):
+        """Return OCR lines with coordinates instead of one flattened string."""
         data = pytesseract.image_to_data(
             image,
             lang=self.language,
+            config="--oem 3 --psm 3",
             output_type=Output.DICT,
-            config="--oem 3 --psm 6"
         )
+        lines = {}
+        count = len(data.get("text", []))
 
-        height, width = image.shape[:2]
-
-        blocks = []
-
-        count = len(data["text"])
-
-        for i in range(count):
-
-            text = data["text"][i].strip()
-
+        for index in range(count):
+            text = str(data["text"][index] or "").strip()
             try:
-                confidence = float(data["conf"][i])
-            except (ValueError, TypeError):
+                confidence = float(data["conf"][index])
+            except (TypeError, ValueError):
                 confidence = -1
-
-            # Пропускаем пустые элементы
-            if not text:
+            if not text or confidence < 0:
                 continue
 
-            # Пропускаем элементы,
-            # которые Tesseract не смог распознать
-            if confidence < 0:
-                continue
+            key = (
+                data.get("block_num", [0] * count)[index],
+                data.get("par_num", [0] * count)[index],
+                data.get("line_num", [0] * count)[index],
+            )
+            left = int(data["left"][index])
+            top = int(data["top"][index])
+            right = left + int(data["width"][index])
+            bottom = top + int(data["height"][index])
+            line = lines.setdefault(key, {"words": [], "boxes": [], "confidence": []})
+            line["words"].append(text)
+            line["boxes"].append((left, top, right, bottom))
+            line["confidence"].append(confidence / 100)
 
-            x = int(data["left"][i])
-            y = int(data["top"][i])
-
-            w = int(data["width"][i])
-            h = int(data["height"][i])
-
-            # Координаты в пикселях
-            bbox_pixels = [
-                x,
-                y,
-                x + w,
-                y + h
-            ]
-
-            # Координаты от 0 до 1
-            bbox_normalized = [
-                x / width,
-                y / height,
-                (x + w) / width,
-                (y + h) / height
-            ]
-
-            blocks.append({
-                "type": "word",
-                "text": text,
-
-                "confidence": round(
-                    confidence / 100,
-                    4
-                ),
-
-                "bbox": bbox_normalized,
-                "bbox_pixels": bbox_pixels
+        result = []
+        for line in lines.values():
+            boxes = line["boxes"]
+            result.append({
+                "text": " ".join(line["words"]),
+                "bbox": [
+                    min(box[0] for box in boxes),
+                    min(box[1] for box in boxes),
+                    max(box[2] for box in boxes),
+                    max(box[3] for box in boxes),
+                ],
+                "confidence": sum(line["confidence"]) / len(line["confidence"]),
             })
 
-        return blocks
+        return result

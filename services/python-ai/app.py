@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -28,7 +29,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 MODEL_PATH = Path(os.getenv("AI_MODEL_PATH", str(BASE_DIR / "models" / "construction-minilm-132")))
 MAX_REQUEST_BYTES = int(os.getenv("AI_MAX_REQUEST_BYTES", str(210 * 1024 * 1024)))
 OCR_DPI = int(os.getenv("AI_OCR_DPI", "250"))
-SEARCH_TOP_K = int(os.getenv("AI_SEARCH_TOP_K", "5"))
+SEARCH_TOP_K = int(os.getenv("AI_SEARCH_TOP_K", "12"))
+SEARCH_LEXICAL_WEIGHT = float(os.getenv("AI_SEARCH_LEXICAL_WEIGHT", "0.25"))
+SEARCH_ANCHOR_WEIGHT = float(os.getenv("AI_SEARCH_ANCHOR_WEIGHT", "0.45"))
+SEARCH_MIN_ANCHOR_SCORE = float(os.getenv("AI_SEARCH_MIN_ANCHOR_SCORE", "0.14"))
 MAX_REQUEST_BYTES = int(
     os.getenv(
         "AI_MAX_REQUEST_BYTES",
@@ -42,6 +46,52 @@ _engine_lock = threading.RLock()
 
 class AiRequestError(ValueError):
     pass
+
+
+def normalize_filename(value: object) -> str:
+    """Repair a UTF-8 filename decoded as Latin-1 by a multipart parser."""
+    name = str(value or "").replace("\x00", "")
+    if not any(marker in name for marker in ("Ã", "Â", "Ð", "Ñ")):
+        return name
+    try:
+        decoded = name.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return name
+    return name if "\ufffd" in decoded else decoded
+
+
+def extract_document_metadata(file_name: str, parsed_document: dict) -> dict[str, str | None]:
+    """Extract safe document metadata that can be shown with an evidence fragment."""
+    pages = parsed_document.get("pages") or []
+    text = "\n".join(str(page.get("text") or "") for page in pages[:5])
+
+    revision_match = re.search(
+        r"(?:редакци(?:я|и)|ред\.?|ревизи(?:я|и)|рев\.?)\s*(?:№|N|номер|:|-)?\s*([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9._/-]{0,20})",
+        text,
+        re.IGNORECASE,
+    )
+    sheet_match = re.search(
+        r"(?:лист|л\.)\s*№?\s*(\d+)(?:\s*(?:из|/)\s*(\d+))?",
+        text,
+        re.IGNORECASE,
+    )
+    if re.search(r"\b(?:утверждено|утверждена|утвержден|утверждаю)\b", text, re.IGNORECASE):
+        approval_status = "Утверждено"
+    elif re.search(r"\b(?:согласовано|согласован|согласована)\b", text, re.IGNORECASE):
+        approval_status = "Согласовано"
+    else:
+        approval_status = None
+
+    return {
+        "revision": revision_match.group(1) if revision_match else None,
+        "approval_status": approval_status,
+        "sheet": (
+            f"{sheet_match.group(1)} из {sheet_match.group(2)}"
+            if sheet_match and sheet_match.group(2)
+            else sheet_match.group(1) if sheet_match else None
+        ),
+        "document_code": Path(file_name).stem,
+    }
 
 
 def json_bytes(payload: dict) -> bytes:
@@ -71,7 +121,7 @@ def parse_multipart(content_type: str, body: bytes) -> tuple[dict[str, str], dic
         name = part.get_param("name", header="content-disposition")
         if not name:
             continue
-        filename = part.get_filename()
+        filename = normalize_filename(part.get_filename())
         payload = part.get_payload(decode=True) or b""
         if filename:
             uploaded = {"name": filename, "content": payload, "mime_type": part.get_content_type()}
@@ -98,9 +148,15 @@ def parse_queries(raw: str) -> list[dict]:
         code = str(item.get("code", "")).strip()
         parameter = str(item.get("parameter", "")).strip()
         trigger = str(item.get("trigger", "")).strip()
+        source = str(item.get("source", "")).strip()
+        section = str(item.get("section", "")).strip()
         if not code or not parameter:
             continue
-        queries.append({"code": code, "text": ". ".join(part for part in (parameter, trigger) if part)})
+        queries.append({
+            "code": code,
+            "text": ". ".join(part for part in (parameter, section, source, trigger) if part),
+            "anchor": ". ".join(part for part in (parameter, source) if part),
+        })
     return queries
 
 
@@ -130,7 +186,15 @@ def process_document(fields: dict[str, str], uploaded: dict[str, object]) -> dic
 
         parser = DocumentParser(dpi=OCR_DPI)
         parsed_document = parser.parse(str(input_path))
-        chunker = DocumentChunker(max_words=120, overlap_words=20, min_words=8, min_ocr_confidence=0.0)
+        document_metadata = extract_document_metadata(file_name, parsed_document)
+        chunker = DocumentChunker(
+            chunk_size=700,
+            overlap=120,
+            max_words=int(os.getenv("AI_CHUNK_MAX_WORDS", "48")),
+            overlap_words=int(os.getenv("AI_CHUNK_OVERLAP_WORDS", "12")),
+            min_words=8,
+            min_ocr_confidence=0.0,
+        )
         chunks_document = chunker.chunk(parsed_document)
         chunks_path.write_text(json.dumps(chunks_document, ensure_ascii=False), encoding="utf-8")
 
@@ -149,8 +213,15 @@ def process_document(fields: dict[str, str], uploaded: dict[str, object]) -> dic
                         item["text"],
                         top_k=SEARCH_TOP_K,
                         hybrid=True,
-                        lexical_weight=0.15,
+                        lexical_weight=SEARCH_LEXICAL_WEIGHT,
+                        anchor_text=item["anchor"],
+                        anchor_weight=SEARCH_ANCHOR_WEIGHT,
+                        min_anchor_score=SEARCH_MIN_ANCHOR_SCORE,
                     )
+
+        for evidence_list in results_by_parameter.values():
+            for evidence in evidence_list:
+                evidence["document_metadata"] = document_metadata
 
         pages = parsed_document.get("pages") or []
         return {

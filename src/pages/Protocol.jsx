@@ -149,8 +149,9 @@ export default function Protocol() {
                   <th>ID</th>
                   <th>Код</th>
                   <th>Параметр</th>
-                  <th>Ожидаемое (ПД/РД)</th>
-                  <th>Фактическое</th>
+                  <th>Сравнение</th>
+                  <th>Значение 1</th>
+                  <th>Значение 2</th>
                   <th>Приоритет</th>
                   <th>Статус</th>
                   <th></th>
@@ -165,6 +166,7 @@ export default function Protocol() {
                       <div style={{ fontWeight: 600 }}>{f.parameter_name}</div>
                       <div className="faint" style={{ fontSize: 11.5 }}>{f.section}</div>
                     </td>
+                    <td className="mono" style={{ fontSize: 12.5, whiteSpace: 'nowrap' }}>{comparisonLabel(f)}</td>
                     <td className="muted" style={{ fontSize: 12.5, maxWidth: 200 }}>{f.expected_value}</td>
                     <td className="muted" style={{ fontSize: 12.5, maxWidth: 200 }}>{f.actual_value}</td>
                     <td>
@@ -177,7 +179,7 @@ export default function Protocol() {
                   </tr>
                 ))}
                 {rows.length === 0 && (
-                  <tr><td colSpan={8}><div className="empty-state"><div className="icon">✓</div>Нет записей в этой категории</div></td></tr>
+                  <tr><td colSpan={9}><div className="empty-state"><div className="icon">✓</div>Нет записей в этой категории</div></td></tr>
                 )}
               </tbody>
             </table>
@@ -186,4 +188,11 @@ export default function Protocol() {
       )}
     </div>
   )
+}
+
+function comparisonLabel(finding) {
+  const labels = { PD: 'ПД', RD: 'РД', ID: 'ИД' }
+  const left = finding.comparison?.left_stage || finding.pd_source?.stage || 'PD'
+  const right = finding.comparison?.right_stage || finding.rd_source?.RD?.stage || finding.rd_source?.ID?.stage || 'RD'
+  return `${labels[left] || left} ↔ ${labels[right] || right}`
 }

@@ -23,7 +23,7 @@ function extOf(name) {
 export default function UploadPage() {
   const { id } = useParams()
   const nav = useNavigate()
-  const { objects, ensureObjects, getUploads, ensureUploads, addFiles, removeFile, setProcessStatus, getProcessStatus } = useVerification()
+  const { objects, ensureObjects, getUploads, getEffectiveDocStatus, ensureUploads, addFiles, removeFile, setProcessStatus, getProcessStatus } = useVerification()
   const obj = objects.find((o) => o.id === id)
 
   const [inFlight, setInFlight] = useState([]) // {tempId, stage, name, size, progress}
@@ -46,7 +46,11 @@ export default function UploadPage() {
     return <div className="empty-state">Загрузка объекта… <Link className="link-btn" to="/">На дашборд</Link></div>
   }
 
-  const docStatus = { PD: obj.pd_status, RD: obj.rd_status, ID: obj.id_status }
+  const docStatus = {
+    PD: getEffectiveDocStatus(id, 'PD'),
+    RD: getEffectiveDocStatus(id, 'RD'),
+    ID: getEffectiveDocStatus(id, 'ID'),
+  }
 
   function pushError(msg) {
     const errId = uid()
@@ -151,7 +155,7 @@ export default function UploadPage() {
             files={uploads[s.key]}
             inFlight={inFlight.filter((f) => f.stage === s.key)}
             onFiles={(fl) => validateAndStage(s.key, fl)}
-            onRemove={(fileId) => removeFile(id, s.key, fileId)}
+            onRemove={(fileId) => removeFile(id, s.key, fileId).catch((error) => pushError(error.message || 'Не удалось удалить файл'))}
           />
         ))}
       </div>

@@ -1,5 +1,6 @@
 import undici from 'undici'
 import { File } from 'node:buffer'
+import { normalizeFilename } from '../utils/filename.js'
 
 const { Agent, fetch, FormData } = undici
 
@@ -24,6 +25,7 @@ export async function processDocumentWithAi({
   const url = process.env.PYTHON_AI_URL || DEFAULT_AI_URL
 
   const form = new FormData()
+  const fileName = normalizeFilename(file.name)
 
   form.append('object_id', objectId)
   form.append('process_id', processId)
@@ -33,7 +35,7 @@ export async function processDocumentWithAi({
 
   const uploadedFile = new File(
       [file.content],
-      file.name,
+      fileName,
       {
         type: file.mime_type || 'application/octet-stream',
       }
@@ -42,7 +44,7 @@ export async function processDocumentWithAi({
   form.append('file', uploadedFile)
 
   console.log(
-      `AI request started: stage=${file.stage}, file=${file.name}, timeout=${AI_TIMEOUT_MS}ms`
+      `AI request started: stage=${file.stage}, file=${fileName}, timeout=${AI_TIMEOUT_MS}ms`
   )
 
   try {
@@ -54,7 +56,7 @@ export async function processDocumentWithAi({
     })
 
     console.log(
-        `AI response received: stage=${file.stage}, file=${file.name}, HTTP=${response.status}`
+        `AI response received: stage=${file.stage}, file=${fileName}, HTTP=${response.status}`
     )
 
     let payload = null

@@ -93,7 +93,8 @@ export async function initDatabase() {
       content BYTEA NOT NULL,
       uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       parse_status TEXT NOT NULL DEFAULT 'PENDING',
-      parse_error TEXT
+      parse_error TEXT,
+      page_count INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS findings (
@@ -321,6 +322,8 @@ export async function initDatabase() {
     ALTER TABLE objects ADD COLUMN IF NOT EXISTS process_progress NUMERIC NOT NULL DEFAULT 0;
     ALTER TABLE objects ADD COLUMN IF NOT EXISTS process_error TEXT;
     ALTER TABLE files ADD COLUMN IF NOT EXISTS parse_error TEXT;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS page_count INTEGER;
+    ALTER TABLE findings ADD COLUMN IF NOT EXISTS comparison JSONB;
     ALTER TABLE analysis_processes ADD COLUMN IF NOT EXISTS error TEXT;
   `)
 
