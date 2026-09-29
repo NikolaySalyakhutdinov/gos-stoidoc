@@ -4,6 +4,7 @@ import { useVerification } from '../store/VerificationStore'
 import StatusBadge from '../components/StatusBadge'
 import Icon from '../components/Icon'
 import { formatDateTime } from '../utils/helpers'
+import { hasBothComparisonValues } from '../utils/findingFilters'
 import { PROCESS_STATUS, LOAD_STATUS, SCENARIOS } from '../data/constants'
 
 const PARSE_STEPS = [
@@ -25,7 +26,7 @@ const DELETE_REASONS = [
 export default function ObjectOverview() {
   const { id } = useParams()
   const nav = useNavigate()
-  const { objects, ensureObjects, getFindings, ensureFindings, getCompleteness, ensureCompleteness, setProcessStatus, refreshObject, deleteObject } = useVerification()
+  const { objects, ensureObjects, getFindings, ensureFindings, getCompleteness, ensureCompleteness, setProcessStatus, refreshObject, subscribeToProgress, deleteObject } = useVerification()
   const obj = objects.find((o) => o.id === id)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState('')
@@ -35,9 +36,10 @@ export default function ObjectOverview() {
   const [analysisError, setAnalysisError] = useState('')
   const pollRef = useRef(null)
   const refreshObjectRef = useRef(refreshObject)
+  const subscribeProgressRef = useRef(subscribeToProgress)
 
   const status = obj?.process_status
-  const findings = obj ? getFindings(id) : []
+  const findings = obj ? getFindings(id).filter(hasBothComparisonValues) : []
   const completeness = obj ? getCompleteness(id) : []
 
   useEffect(() => {
@@ -49,15 +51,21 @@ export default function ObjectOverview() {
 
   useEffect(() => {
     refreshObjectRef.current = refreshObject
-  }, [refreshObject])
+    subscribeProgressRef.current = subscribeToProgress
+  }, [refreshObject, subscribeToProgress])
 
   useEffect(() => {
-    if (status !== 'PARSING') return undefined
+    if (!['PARSING', 'VERIFYING'].includes(status)) return undefined
+    return subscribeProgressRef.current(id)
+  }, [id, status])
+
+  useEffect(() => {
+    if (!['PARSING', 'VERIFYING'].includes(status)) return undefined
     let stopped = false
     const poll = async () => {
       try {
         const updated = await refreshObjectRef.current(id)
-        if (!stopped && updated?.process_status === 'PARSING') pollRef.current = setTimeout(poll, 1500)
+        if (!stopped && ['PARSING', 'VERIFYING'].includes(updated?.process_status)) pollRef.current = setTimeout(poll, 1500)
       } catch {
         if (!stopped) pollRef.current = setTimeout(poll, 2500)
       }
@@ -224,7 +232,7 @@ export default function ObjectOverview() {
         </div>
       )}
 
-      {status === 'PARSING' && (
+      {['PARSING', 'VERIFYING'].includes(status) && (
         <div className="card card-pad" style={{ marginTop: 18 }}>
           <div style={{ fontWeight: 700, marginBottom: 10, fontSize: 14 }}>Идёт обработка документов</div>
           <div className="progress-track"><div className="progress-fill" style={{ width: `${Number(obj.process_progress || 0)}%` }} /></div>

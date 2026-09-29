@@ -3,6 +3,7 @@ import { query, withTransaction } from '../db.js'
 import { recordAudit } from '../utils/http.js'
 import { normalizeFilename } from '../utils/filename.js'
 import { processDocumentWithAi } from './aiGateway.js'
+import { publishProgress } from './progressEvents.js'
 
 const STAGES = ['PD', 'RD', 'ID']
 const AI_DISCOVERY_METHOD = 'AI_SEMANTIC_COMPARATOR'
@@ -406,6 +407,13 @@ async function updateProgress({ objectId, processId, status, step, progress, err
       [status === 'COMPLETED' ? 'READY' : status, step, progress, error, objectId],
     )
   })
+  publishProgress(objectId, {
+    process_id: processId,
+    process_status: status === 'COMPLETED' ? 'READY' : status,
+    process_step: step,
+    process_progress: progress,
+    process_error: error,
+  })
 }
 
 async function persistFileResult({ client, objectId, processId, file, result }) {
@@ -573,6 +581,13 @@ export async function runObjectAnalysis({ objectId, processId, req }) {
       )
       await recordAudit(client, { req, objectId, action: 'AI_ANALYSIS_COMPLETED', details: { processId, files: files.length, ...comparisonSummary, modelVersion } })
     })
+    publishProgress(objectId, {
+      process_id: processId,
+      process_status: 'READY',
+      process_step: 'Готово',
+      process_progress: 100,
+      process_error: null,
+    })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     await withTransaction(async (client) => {
@@ -581,6 +596,13 @@ export async function runObjectAnalysis({ objectId, processId, req }) {
       await client.query(`UPDATE analysis_processes SET status = 'FAILED', current_step = 'Ошибка', error = $1, updated_at = NOW() WHERE process_id = $2`, [message, processId]).catch(() => {})
       await client.query(`UPDATE objects SET process_status = 'FAILED', process_step = 'Ошибка обработки', process_error = $1, updated_at = NOW() WHERE id = $2`, [message, objectId]).catch(() => {})
       await recordAudit(client, { req, objectId, action: 'AI_ANALYSIS_FAILED', details: { processId, error: message } }).catch(() => {})
+    })
+    publishProgress(objectId, {
+      process_id: processId,
+      process_status: 'FAILED',
+      process_step: 'Ошибка обработки',
+      process_progress: 0,
+      process_error: message,
     })
     console.error(`AI analysis failed for ${objectId}:`, message)
   }

@@ -5,6 +5,7 @@ import StatusBadge from '../components/StatusBadge'
 import Icon from '../components/Icon'
 import { FINDING_STATUS, REASON_CODES, DISCOVERY_METHODS } from '../data/constants'
 import { formatDateTime } from '../utils/helpers'
+import { hasBothComparisonValues } from '../utils/findingFilters'
 import { apiFetchBlob } from '../api/client'
 
 export default function Verify() {
@@ -21,9 +22,11 @@ export default function Verify() {
     ensureFindings(id)
   }, [id, ensureObjects, ensureFindings])
 
-  const findings = getFindings(id)
+  const allFindings = getFindings(id)
+  const findings = allFindings.filter(hasBothComparisonValues)
   const idx = findings.findIndex((f) => f.finding_id === findingId)
   const f = findings[idx]
+  const hiddenFinding = allFindings.find((finding) => finding.finding_id === findingId)
   const prev = findings[idx - 1]
   const next = findings[idx + 1]
   const comparison = useMemo(() => getComparisonPair(f || {}), [f])
@@ -64,7 +67,7 @@ export default function Verify() {
   }
 
   if (!obj || !f) {
-    return <div className="empty-state">Загрузка записи… <Link className="link-btn" to={`/objects/${id}/protocol`}>Вернуться к протоколу</Link></div>
+    return <div className="empty-state">{obj && hiddenFinding ? 'Запись скрыта: отсутствуют подтверждённые значения с обеих сторон.' : 'Загрузка записи…'} <Link className="link-btn" to={`/objects/${id}/protocol`}>Вернуться к протоколу</Link></div>
   }
 
   const stageLabel = (stage) => ({ PD: 'ПД', RD: 'РД', ID: 'ИД' }[stage] || stage || 'Документ')

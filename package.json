@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "server:install": "npm --prefix server install",
     "server:dev": "npm --prefix server run dev",
-    "ai:test": "docker compose run --rm python-ai python -m unittest discover -s tests -p 'test_*.py'",
+    "ai:test": "docker compose run --rm python-ai python -m unittest discover -s tests",
     "dev:full": "concurrently -n web,api -c blue,green \"npm run dev\" \"npm run server:dev\""
   },
   "dependencies": {

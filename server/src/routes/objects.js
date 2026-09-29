@@ -6,6 +6,7 @@ import { requireAuth } from '../middleware/auth.js'
 import { asyncHandler, recordAudit } from '../utils/http.js'
 import { normalizeFilename } from '../utils/filename.js'
 import { runObjectAnalysis } from '../services/aiPipeline.js'
+import { subscribeProgress } from '../services/progressEvents.js'
 import { serializeObject, serializeFinding, findingsSummary, objectColor } from '../utils/serialize.js'
 
 const router = Router()
@@ -94,6 +95,43 @@ router.post('/', asyncHandler(async (req, res) => {
     return inserted.rows[0]
   })
   res.status(201).json({ object: await serializeObjectWithSummary(row) })
+}))
+
+router.get('/:id/events', asyncHandler(async (req, res) => {
+  const row = await getObject(req.params.id)
+  if (!row) return res.status(404).json({ error: 'Объект не найден' })
+
+  res.status(200)
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-cache, no-transform')
+  res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Accel-Buffering', 'no')
+  if (typeof res.flushHeaders === 'function') res.flushHeaders()
+
+  const send = (payload) => {
+    if (!res.writableEnded) res.write(`event: progress\ndata: ${JSON.stringify(payload)}\n\n`)
+  }
+
+  send({
+    type: 'progress',
+    object_id: row.id,
+    process_status: row.process_status,
+    process_step: row.process_step,
+    process_progress: Number(row.process_progress || 0),
+    process_error: row.process_error,
+    at: new Date().toISOString(),
+  })
+
+  const unsubscribe = subscribeProgress(row.id, send)
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(': heartbeat\n\n')
+  }, 15000)
+  const cleanup = () => {
+    clearInterval(heartbeat)
+    unsubscribe()
+  }
+  req.on('close', cleanup)
+  res.on('error', cleanup)
 }))
 
 router.get('/:id', asyncHandler(async (req, res) => {

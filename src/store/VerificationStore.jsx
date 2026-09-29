@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { apiFetch } from '../api/client'
+import { apiBaseUrl, apiFetch, getToken } from '../api/client'
 import { useAuth } from './AuthStore'
 
 const Ctx = createContext(null)
@@ -73,6 +73,74 @@ export function VerificationProvider({ children }) {
       },
 
       refreshObject,
+
+      subscribeToProgress(objectId) {
+        if (!isAuthenticated || typeof fetch !== 'function' || typeof AbortController === 'undefined') return () => {}
+        const token = getToken()
+        if (!token) return () => {}
+
+        const controller = new AbortController()
+        let stopped = false
+
+        const onProgress = (payload) => {
+          try {
+            setObjects((list) => list.map((object) => (
+              object.id === objectId
+                ? {
+                    ...object,
+                    process_status: payload.process_status ?? object.process_status,
+                    process_step: payload.process_step ?? object.process_step,
+                    process_progress: payload.process_progress ?? object.process_progress,
+                    process_error: payload.process_error ?? null,
+                  }
+                : object
+            )))
+            if (['READY', 'FAILED'].includes(payload.process_status)) {
+              refreshObject(objectId).catch(() => {})
+            }
+          } catch {
+            // Ignore malformed stream events; polling remains the fallback.
+          }
+        }
+
+        const consume = async () => {
+          try {
+            const response = await fetch(`${apiBaseUrl()}/api/objects/${encodeURIComponent(objectId)}/events`, {
+              headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' },
+              signal: controller.signal,
+            })
+            if (!response.ok || !response.body) return
+
+            const reader = response.body.getReader()
+            const decoder = new TextDecoder()
+            let buffer = ''
+            while (!stopped) {
+              const { done, value } = await reader.read()
+              if (done) break
+              buffer += decoder.decode(value, { stream: true })
+              const events = buffer.split(/\r?\n\r?\n/)
+              buffer = events.pop() || ''
+              events.forEach((event) => {
+                const dataLine = event.split(/\r?\n/).find((line) => line.startsWith('data:'))
+                if (!dataLine) return
+                try {
+                  onProgress(JSON.parse(dataLine.slice(5).trim()))
+                } catch {
+                  // Ignore malformed stream events; polling remains the fallback.
+                }
+              })
+            }
+          } catch {
+            // Polling remains active when the live stream is unavailable.
+          }
+        }
+        consume()
+
+        return () => {
+          stopped = true
+          controller.abort()
+        }
+      },
 
       getObject(objectId) {
         return objects.find((o) => o.id === objectId)

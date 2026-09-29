@@ -4,6 +4,7 @@ import { useVerification } from '../store/VerificationStore'
 import StatusBadge from '../components/StatusBadge'
 import Icon from '../components/Icon'
 import { FINDING_STATUS, LOAD_STATUS, SCENARIOS } from '../data/constants'
+import { hasBothComparisonValues } from '../utils/findingFilters'
 
 const TABS = [
   { key: 'completeness', label: 'Комплектность', statuses: [] },
@@ -33,22 +34,23 @@ export default function Protocol() {
 
   const status = obj?.process_status
   const findings = getFindings(id)
+  const comparableFindings = findings.filter(hasBothComparisonValues)
   const completeness = getCompleteness(id)
 
   const counts = useMemo(() => {
     const c = {}
     TABS.forEach((t) => {
-      c[t.key] = t.statuses.length ? findings.filter((f) => t.statuses.includes(f.status)).length : completeness.length
+      c[t.key] = t.statuses.length ? comparableFindings.filter((f) => t.statuses.includes(f.status)).length : completeness.length
     })
     return c
-  }, [findings, completeness])
+  }, [comparableFindings, completeness])
 
   if (!obj) return <div className="empty-state">Загрузка объекта… <Link className="link-btn" to="/">На дашборд</Link></div>
 
   const activeTabDef = TABS.find((t) => t.key === tab)
-  const rows = activeTabDef.statuses.length ? findings.filter((f) => activeTabDef.statuses.includes(f.status)) : null
+  const rows = activeTabDef.statuses.length ? comparableFindings.filter((f) => activeTabDef.statuses.includes(f.status)) : null
 
-  const openCandidates = findings.filter((f) => ['CANDIDATE', 'PENDING'].includes(f.status)).length
+  const openCandidates = comparableFindings.filter((f) => ['CANDIDATE', 'PENDING'].includes(f.status)).length
   const canFinalize = status === 'VERIFYING' || status === 'COMPLETED'
   const isFinalizeReady = openCandidates === 0
 

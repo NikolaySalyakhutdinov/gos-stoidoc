@@ -4,6 +4,10 @@ const REFRESH_TOKEN_KEY = 'stroynadzor-refresh-token-v1'
 
 let refreshPromise = null
 
+export function apiBaseUrl() {
+  return BASE_URL
+}
+
 export function getToken() {
   try {
     return localStorage.getItem(TOKEN_KEY)
