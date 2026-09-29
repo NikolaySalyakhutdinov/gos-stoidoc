@@ -240,7 +240,7 @@ def process_document(fields: dict[str, str], uploaded: dict[str, object]) -> dic
                 "name": MODEL_PATH.name,
                 "path": str(MODEL_PATH),
                 "embedding_dim": embedding_dim,
-                "search": "semantic+lexical",
+                "search": "semantic+lexical+anchor",
             },
             "results_by_parameter": results_by_parameter,
         }
